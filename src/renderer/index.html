@@ -83,16 +83,42 @@
       >
         <span class="menu-glyph" aria-hidden="true"></span>
       </button>
-      <button id="call-toggle" type="button" class="fab-orb" disabled aria-pressed="false">
-        <span class="orb-shadow" aria-hidden="true"></span>
-        <span class="siri-orb" aria-hidden="true">
-          <span class="orb-surface"></span>
-          <span class="orb-core"></span>
-          <span class="orb-glow"></span>
-        </span>
-        <span id="call-label" class="call-label">Call</span>
-      </button>
-      <p id="status" class="status">Checking OpenAI…</p>
+      <div id="call-stage" class="call-stage">
+        <div id="call-meta" class="call-meta" aria-hidden="true">
+          <span class="call-live"></span>
+          <span id="call-timer" class="call-timer">0:00</span>
+        </div>
+        <button id="call-toggle" type="button" class="fab-orb" disabled aria-pressed="false">
+          <span class="orb-shadow" aria-hidden="true"></span>
+          <span class="siri-orb" aria-hidden="true">
+            <span class="orb-aurora"></span>
+            <span class="orb-surface"></span>
+            <span class="orb-core"></span>
+            <span class="orb-glow"></span>
+            <span class="orb-sheen"></span>
+          </span>
+          <span id="call-label" class="call-label">Call</span>
+        </button>
+        <canvas id="call-wave" class="call-wave" aria-hidden="true"></canvas>
+        <p id="status" class="status">Checking OpenAI…</p>
+        <button id="call-end" type="button" class="call-end" aria-label="End call" disabled tabindex="-1">
+          <span class="call-end-glyph" aria-hidden="true"></span>
+          <span>End</span>
+        </button>
+        <div id="tool-activity" class="cu-card" hidden role="status" aria-live="polite">
+          <div class="cu-head">
+            <span class="cu-icon" aria-hidden="true"></span>
+            <span class="cu-title">Computer use</span>
+            <span id="tool-activity-target" class="cu-target">Browser</span>
+          </div>
+          <div class="cu-status-row">
+            <span class="tool-activity-pulse" aria-hidden="true"></span>
+            <span id="tool-activity-label" class="tool-activity-label">Working…</span>
+          </div>
+          <div class="cu-track"><span class="cu-track-fill"></span></div>
+          <button id="tool-activity-stop" type="button" class="tool-activity-stop">End</button>
+        </div>
+      </div>
       <audio id="remote-audio" autoplay aria-label="Realtime assistant audio">
         <track kind="captions" label="Realtime captions are not displayed yet" />
       </audio>

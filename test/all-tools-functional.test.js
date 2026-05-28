@@ -11,35 +11,44 @@ async function withToolHarness(callback) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const parsedUrl = new URL(url);
-    if (parsedUrl.hostname === "api.openai.com" && parsedUrl.pathname === "/v1/responses") {
+    if (
+      parsedUrl.hostname === "chatgpt.com" &&
+      parsedUrl.pathname === "/backend-api/codex/responses"
+    ) {
       const body = JSON.parse(init.body);
       assert.equal(init.headers.Authorization, "Bearer test-token");
-      if (body.tools?.[0]?.type === "computer") {
-        return createResponse({
-          url,
-          contentType: "application/json",
-          body: JSON.stringify(
-            body.previous_response_id
-              ? {
-                  id: "computer-response-2",
-                  model: "gpt-5.4",
-                  output: [{ type: "message", content: [{ text: "Computer task finished." }] }],
-                }
-              : {
-                  id: "computer-response-1",
-                  model: "gpt-5.4",
-                  output: [
-                    {
-                      type: "computer_call",
-                      call_id: "computer-call-1",
-                      actions: [{ type: "screenshot" }],
-                    },
-                  ],
-                },
-          ),
-        });
-      }
-      throw new Error("analyze_screen should not call the Responses API directly.");
+      assert.equal(init.headers["ChatGPT-Account-ID"], "acc-test");
+      const sawScreenshot = body.input.some((item) => item.type === "function_call_output");
+      const events = sawScreenshot
+        ? [
+            { type: "response.created", response: { id: "computer-response-2" } },
+            {
+              type: "response.output_item.done",
+              item: {
+                type: "function_call",
+                name: "task_complete",
+                arguments: JSON.stringify({ summary: "Computer task finished." }),
+                call_id: "call-done",
+              },
+            },
+          ]
+        : [
+            { type: "response.created", response: { id: "computer-response-1" } },
+            {
+              type: "response.output_item.done",
+              item: {
+                type: "function_call",
+                name: "computer_screenshot",
+                arguments: "{}",
+                call_id: "call-shot",
+              },
+            },
+          ];
+      return createResponse({
+        url,
+        contentType: "text/event-stream",
+        body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""),
+      });
     }
     if (parsedUrl.hostname === "duckduckgo.com") {
       return createResponse({
@@ -64,7 +73,7 @@ async function withToolHarness(callback) {
         ...createScreenshotHarness(directory),
       },
       computerUse: {
-        openAI: { accessToken: "test-token" },
+        openAI: { accessToken: "test-token", accountId: "acc-test" },
         computerTargetFactory: async () => createComputerHarness(),
       },
     });
@@ -288,6 +297,15 @@ test("every registered Realtime tool executes a functional path", async () => {
     assert.equal(result.status, "completed");
     assert.equal(result.finalText, "Computer task finished.");
     assert.equal(result.steps, 1);
+
+    result = await executeRealtimeTool("cancel_computer_use", {}, options);
+    observedNames.push("cancel_computer_use");
+    assert.equal(result.status, "idle");
+
+    result = await executeRealtimeTool("end_call", { reason: "Ken said goodbye" }, options);
+    observedNames.push("end_call");
+    assert.equal(result.status, "call_ended");
+    assert.equal(result.reason, "Ken said goodbye");
 
     assert.deepEqual(
       observedNames.sort(),

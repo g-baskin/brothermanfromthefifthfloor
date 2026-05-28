@@ -94,6 +94,30 @@ test("tool handler executes calls once per call id and sends Realtime output eve
   ]);
 });
 
+test("tool handler signals activity start/end around execution", async () => {
+  const activity = [];
+  const handler = createRealtimeToolHandler({
+    executeTool: async () => {
+      activity.push("exec");
+      return { status: "completed" };
+    },
+    sendEvent: () => {},
+    setMode: () => {},
+    setStatus: () => {},
+    onToolStart: (name) => activity.push(`start:${name}`),
+    onToolEnd: (name) => activity.push(`end:${name}`),
+  });
+
+  await handler.handleEvent({
+    type: "response.function_call_arguments.done",
+    call_id: "call-cu",
+    name: "computer_use_task",
+    arguments: "{}",
+  });
+
+  assert.deepEqual(activity, ["start:computer_use_task", "exec", "end:computer_use_task"]);
+});
+
 test("tool handler sends screenshot image as explicit response input", async () => {
   const sentEvents = [];
   const realtimeInput = {
@@ -138,6 +162,41 @@ test("tool handler sends screenshot image as explicit response input", async () 
   });
 });
 
+test("end_call acknowledges without a new response and signals the host to hang up", async () => {
+  const sentEvents = [];
+  const executedCalls = [];
+  const endCalls = [];
+  const handler = createRealtimeToolHandler({
+    executeTool: async (name, args) => {
+      executedCalls.push({ name, args });
+      return { status: "ok" };
+    },
+    sendEvent: (event) => sentEvents.push(event),
+    setMode: () => {},
+    setStatus: () => {},
+    onEndCall: (args) => endCalls.push(args),
+  });
+
+  assert.equal(
+    await handler.handleEvent({
+      type: "response.function_call_arguments.done",
+      call_id: "call-end",
+      name: "end_call",
+      arguments: '{"reason":"Ken said bye"}',
+    }),
+    true,
+  );
+
+  // The renderer owns the hangup; end_call must not route to the IPC tool path.
+  assert.deepEqual(executedCalls, []);
+  assert.deepEqual(endCalls, [{ reason: "Ken said bye" }]);
+  // Exactly one event: the function_call_output, with no response.create follow-up.
+  assert.equal(sentEvents.length, 1);
+  assert.equal(sentEvents[0].type, "conversation.item.create");
+  assert.equal(sentEvents[0].item.call_id, "call-end");
+  assert.equal(JSON.parse(sentEvents[0].item.output).status, "call_ended");
+});
+
 test("tool handler wraps execution failures into function outputs", async () => {
   const sentEvents = [];
   const handler = createRealtimeToolHandler({
@@ -170,6 +229,7 @@ test("tool status labels cover active tools", () => {
   assert.equal(formatToolStatus("take_screenshot"), "Taking screenshot…");
   assert.equal(formatToolStatus("analyze_screen"), "Reading screen…");
   assert.equal(formatToolStatus("computer_use_task"), "Using computer…");
+  assert.equal(formatToolStatus("end_call"), "Ending call…");
   assert.equal(formatToolStatus("add_calendar_item"), "Using calendar…");
   assert.equal(formatToolStatus("unknown"), "Using tool…");
 });

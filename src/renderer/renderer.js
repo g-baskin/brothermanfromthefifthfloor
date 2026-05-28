@@ -15,19 +15,94 @@ const diagnosticsOpenButton = document.querySelector("#diagnostics-open");
 const permissionsListElement = document.querySelector("#permissions-list");
 const callToggleButton = document.querySelector("#call-toggle");
 const callLabelElement = document.querySelector("#call-label");
+const callEndButton = document.querySelector("#call-end");
+const callTimerElement = document.querySelector("#call-timer");
+const callWaveCanvas = document.querySelector("#call-wave");
 const remoteAudioElement = document.querySelector("#remote-audio");
+const toolActivityElement = document.querySelector("#tool-activity");
+const toolActivityLabelElement = document.querySelector("#tool-activity-label");
+const toolActivityTargetElement = document.querySelector("#tool-activity-target");
+const toolActivityStopButton = document.querySelector("#tool-activity-stop");
+
+const stoppableTools = new Set(["computer_use_task"]);
+const toolActivityLabels = {
+  computer_use_task: "Computer use running",
+};
+const toolActivityTargets = {
+  computer_use_task: "Browser",
+};
 
 let isOpenAIConnected = false;
 let peerConnection = null;
 let dataChannel = null;
 let localStream = null;
 let audioLevelMonitor = null;
+let pendingHangup = false;
+let hangupFallbackTimer = null;
+let callTimerInterval = null;
+let callStartedAt = 0;
+let isCallActive = false;
 const realtimeToolHandler = createRealtimeToolHandler({
   executeTool: (name, args) => window.brah.executeRealtimeTool(name, args),
   sendEvent: sendRealtimeDataChannelEvent,
   setMode,
   setStatus,
+  onEndCall: requestHangup,
+  onToolStart: showToolActivity,
+  onToolEnd: hideToolActivity,
 });
+
+function showToolActivity(name) {
+  if (!stoppableTools.has(name)) {
+    return;
+  }
+  toolActivityLabelElement.textContent = toolActivityLabels[name] ?? "Working…";
+  toolActivityTargetElement.textContent = toolActivityTargets[name] ?? "System";
+  toolActivityStopButton.disabled = false;
+  toolActivityStopButton.textContent = "End";
+  toolActivityElement.hidden = false;
+  appShellElement.dataset.toolActivity = "active";
+  if (panelController.isOpen()) {
+    void panelController.close({ windowMode: "call" });
+  } else {
+    void setWindowMode("call");
+  }
+}
+
+function hideToolActivity(name) {
+  if (name && !stoppableTools.has(name)) {
+    return;
+  }
+  toolActivityElement.hidden = true;
+  appShellElement.dataset.toolActivity = "idle";
+  if (!isCallActive && !panelController.isOpen()) {
+    void panelController.open();
+  }
+}
+
+async function stopComputerUse() {
+  toolActivityStopButton.disabled = true;
+  toolActivityStopButton.textContent = "Ending…";
+  toolActivityLabelElement.textContent = "Ending…";
+  try {
+    await window.brah.cancelComputerUse();
+  } catch (error) {
+    await writeRendererDiagnostic("computer_use.cancel.error", formatRendererError(error));
+  }
+}
+
+function requestHangup() {
+  if (pendingHangup || !peerConnection) {
+    return;
+  }
+  pendingHangup = true;
+  setStatus("Ending call…");
+  // Prefer to let the model's goodbye response finish (handled on response.done),
+  // but guarantee teardown if that event never arrives.
+  hangupFallbackTimer = setTimeout(() => {
+    void stopCall();
+  }, 5000);
+}
 
 function setStatus(message) {
   statusElement.textContent = message;
@@ -65,10 +140,73 @@ function setOpenAIConnected(connected) {
   }
 }
 
-function setCallActive(active) {
+function setCallActive(active, { inactiveWindowMode = "panel" } = {}) {
+  if (isCallActive === active) {
+    return;
+  }
+  isCallActive = active;
   callToggleButton.classList.toggle("is-active", active);
   callToggleButton.setAttribute("aria-pressed", String(active));
   callLabelElement.textContent = active ? "End" : "Call";
+  callEndButton.disabled = !active;
+  callEndButton.tabIndex = active ? 0 : -1;
+  appShellElement.dataset.call = active ? "active" : "idle";
+  if (active) {
+    startCallTimer();
+    void setWindowMode("call");
+    void setWindowFocusable(false);
+  } else {
+    stopCallTimer();
+    clearWaveform();
+    void setWindowFocusable(true);
+    void setWindowMode(inactiveWindowMode);
+  }
+}
+
+async function setWindowFocusable(focusable) {
+  try {
+    await window.brah.setWindowFocusable(focusable);
+  } catch (error) {
+    await writeRendererDiagnostic("window.set_focusable.error", {
+      focusable,
+      ...formatRendererError(error),
+    });
+  }
+}
+
+async function setWindowMode(mode) {
+  try {
+    await window.brah.setWindowMode(mode);
+  } catch (error) {
+    await writeRendererDiagnostic("window.set_mode.error", {
+      mode,
+      ...formatRendererError(error),
+    });
+  }
+}
+
+function startCallTimer() {
+  callStartedAt = Date.now();
+  updateCallTimer();
+  if (callTimerInterval !== null) {
+    clearInterval(callTimerInterval);
+  }
+  callTimerInterval = setInterval(updateCallTimer, 1000);
+}
+
+function stopCallTimer() {
+  if (callTimerInterval !== null) {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+  }
+  callTimerElement.textContent = "0:00";
+}
+
+function updateCallTimer() {
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - callStartedAt) / 1000));
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  callTimerElement.textContent = `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 async function refreshOpenAIStatus() {
@@ -188,6 +326,10 @@ async function startCall() {
   }
 
   callToggleButton.disabled = true;
+  setCallActive(true);
+  if (panelController.isOpen()) {
+    await panelController.close({ windowMode: "call" });
+  }
   setStatus("Starting…");
   setMode("connecting");
   await writeRendererDiagnostic("call.start", {
@@ -265,7 +407,6 @@ async function startCall() {
       connectionState: peerConnection.connectionState,
     });
 
-    setCallActive(true);
     setStatus("Connecting");
   } catch (error) {
     await writeRendererDiagnostic("call.error", formatRendererError(error));
@@ -298,9 +439,17 @@ async function stopCall() {
     localStream = null;
   }
 
+  if (hangupFallbackTimer) {
+    clearTimeout(hangupFallbackTimer);
+    hangupFallbackTimer = null;
+  }
+  pendingHangup = false;
+
   realtimeToolHandler.reset();
+  hideToolActivity();
   remoteAudioElement.srcObject = null;
-  setCallActive(false);
+  setCallActive(false, { inactiveWindowMode: "panel" });
+  await panelController.open();
   setMode("idle");
   setStatus(isOpenAIConnected ? "Ready" : "Connect OpenAI");
 }
@@ -320,6 +469,10 @@ async function handleRealtimeEvent(event) {
     return;
   }
   if (event.type === "response.done") {
+    if (pendingHangup) {
+      void stopCall();
+      return;
+    }
     setStatus("Listening");
     setMode("listening");
     return;
@@ -451,12 +604,15 @@ function startAudioLevelMonitor(microphoneStream) {
   let animationFrame = null;
   let smoothedLevel = 0;
 
+  setupWaveCanvas();
+
   function read() {
     const micLevel = readAnalyserLevel(micAnalyser);
     const remoteLevel = remoteAnalyser ? readAnalyserLevel(remoteAnalyser) : 0;
     const level = Math.max(micLevel, remoteLevel * 1.15);
     smoothedLevel = smoothedLevel * 0.72 + level * 0.28;
     setOrbLevel(smoothedLevel);
+    drawWaveform(micAnalyser, remoteAnalyser, smoothedLevel);
     animationFrame = requestAnimationFrame(read);
   }
 
@@ -468,6 +624,7 @@ function startAudioLevelMonitor(microphoneStream) {
       if (animationFrame !== null) {
         cancelAnimationFrame(animationFrame);
       }
+      clearWaveform();
       void audioContext.close();
     },
   };
@@ -484,6 +641,7 @@ function createAnalyser(audioContext, stream) {
   return {
     analyser,
     data: new Uint8Array(analyser.fftSize),
+    freq: new Uint8Array(analyser.frequencyBinCount),
   };
 }
 
@@ -496,6 +654,91 @@ function readAnalyserLevel({ analyser, data }) {
   }
   const rms = Math.sqrt(sum / data.length);
   return Math.min(1, Math.max(0, (rms - 0.015) * 8));
+}
+
+/* ---------- Waveform visualizer ----------
+ * Mirrored rounded frequency bars, grounded in wavesurfer.js' bar model
+ * (center-aligned bars, barGap ≈ barWidth/2, roundRect with barRadius). */
+const WAVE_BAR_COUNT = 18;
+const WAVE_CSS_WIDTH = 122;
+const WAVE_CSS_HEIGHT = 20;
+const waveBarHeights = new Array(WAVE_BAR_COUNT).fill(0);
+let waveContext = null;
+let waveGradient = null;
+
+function setupWaveCanvas() {
+  if (!callWaveCanvas) {
+    return;
+  }
+  const ratio = window.devicePixelRatio || 1;
+  callWaveCanvas.width = Math.round(WAVE_CSS_WIDTH * ratio);
+  callWaveCanvas.height = Math.round(WAVE_CSS_HEIGHT * ratio);
+  waveContext = callWaveCanvas.getContext("2d");
+  if (!waveContext) {
+    return;
+  }
+  waveContext.setTransform(ratio, 0, 0, ratio, 0, 0);
+  waveGradient = waveContext.createLinearGradient(0, 0, WAVE_CSS_WIDTH, 0);
+  waveGradient.addColorStop(0, "#818cf8");
+  waveGradient.addColorStop(0.5, "#a5b4fc");
+  waveGradient.addColorStop(1, "#59d9c4");
+}
+
+function clearWaveform() {
+  waveBarHeights.fill(0);
+  if (waveContext) {
+    waveContext.clearRect(0, 0, WAVE_CSS_WIDTH, WAVE_CSS_HEIGHT);
+  }
+}
+
+function drawWaveform(micAnalyser, remoteAnalyser, level) {
+  if (!waveContext) {
+    return;
+  }
+  micAnalyser.analyser.getByteFrequencyData(micAnalyser.freq);
+  if (remoteAnalyser) {
+    remoteAnalyser.analyser.getByteFrequencyData(remoteAnalyser.freq);
+  }
+  // Voice energy lives in the lower spectrum; sample that band across the bars.
+  const usableBins = Math.floor(micAnalyser.freq.length * 0.62);
+  const binsPerBar = Math.max(1, Math.floor(usableBins / WAVE_BAR_COUNT));
+
+  const half = WAVE_CSS_HEIGHT / 2;
+  const spacing = WAVE_CSS_WIDTH / WAVE_BAR_COUNT;
+  const barWidth = Math.max(2, spacing * 0.52);
+  const barRadius = barWidth / 2;
+  const minHeight = 2;
+
+  waveContext.clearRect(0, 0, WAVE_CSS_WIDTH, WAVE_CSS_HEIGHT);
+  waveContext.fillStyle = waveGradient;
+  waveContext.globalAlpha = 0.55 + Math.min(0.45, level * 0.6);
+  waveContext.beginPath();
+
+  for (let i = 0; i < WAVE_BAR_COUNT; i += 1) {
+    let sum = 0;
+    const start = i * binsPerBar;
+    for (let j = 0; j < binsPerBar; j += 1) {
+      const micValue = micAnalyser.freq[start + j] ?? 0;
+      const remoteValue = remoteAnalyser ? (remoteAnalyser.freq[start + j] ?? 0) : 0;
+      sum += Math.max(micValue, remoteValue);
+    }
+    const target = Math.min(1, sum / binsPerBar / 255);
+    // Ease toward the target for fluid, non-jittery motion.
+    waveBarHeights[i] = waveBarHeights[i] * 0.6 + target * 0.4;
+
+    const amplitude = Math.max(minHeight, waveBarHeights[i] * (half - 1));
+    const x = i * spacing + (spacing - barWidth) / 2;
+    const y = half - amplitude;
+    const totalHeight = amplitude * 2;
+    if (typeof waveContext.roundRect === "function") {
+      waveContext.roundRect(x, y, barWidth, totalHeight, barRadius);
+    } else {
+      waveContext.rect(x, y, barWidth, totalHeight);
+    }
+  }
+
+  waveContext.fill();
+  waveContext.globalAlpha = 1;
 }
 
 menuToggleButton.addEventListener("click", (event) => {
@@ -544,6 +787,12 @@ const panelController = createPanelController({
 panelController.init({ openByDefault: true });
 
 callToggleButton.addEventListener("click", toggleCall);
+callEndButton.addEventListener("click", () => {
+  void stopCall();
+});
+toolActivityStopButton.addEventListener("click", () => {
+  void stopComputerUse();
+});
 setOrbLevel(0);
 
 refreshOpenAIStatus().catch((error) => {

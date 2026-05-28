@@ -8,7 +8,8 @@ export const osPermissionDefinitions = Object.freeze([
   {
     id: "screen",
     label: "Screen Recording",
-    description: "Needed for screenshot and screen analysis tools.",
+    description:
+      "Needed for screenshot and screen analysis tools, and to see the live screen during Computer Use OS control.",
     activation:
       "Click Request to trigger Electron screen capture, then allow Brah/Electron in Screen Recording settings.",
   },
@@ -16,12 +17,21 @@ export const osPermissionDefinitions = Object.freeze([
     id: "accessibility",
     label: "Accessibility Control",
     description:
-      "Needed before future OS-level mouse/keyboard control outside the browser harness.",
+      "Needed for Computer Use to control the real OS mouse and keyboard outside the browser harness.",
     activation: "Click Request, then allow Brah/Electron in Accessibility settings.",
+  },
+  {
+    id: "computer",
+    label: "Computer Use",
+    description:
+      "Needed for the computer_use_task automation browser harness (browser target). OS-level control instead requires Screen Recording and Accessibility.",
+    activation: "Click Request to download the automation browser (Chromium).",
   },
 ]);
 
 const knownPermissionIds = new Set(osPermissionDefinitions.map((permission) => permission.id));
+
+export const computerUseBrowserDocsUrl = "https://playwright.dev/docs/browsers#install-browsers";
 
 export function normalizeOsPermissionStatus(status) {
   return ["not-determined", "granted", "denied", "restricted", "unknown", "unsupported"].includes(

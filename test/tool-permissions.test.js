@@ -16,9 +16,15 @@ test("getToolPermissionRequest classifies every active tool with a summary", () 
       toolName: "computer_use_task",
       label: "Use computer",
       level: "sensitive",
-      description: "Open an automated browser and let OpenAI operate it with screenshots.",
+      description:
+        "Let OpenAI operate a browser harness or, in OS mode, control the real machine's mouse and keyboard from screenshots.",
       summary: "task: Open example, url: https://example.com",
     },
+  );
+  assert.equal(
+    getToolPermissionRequest("computer_use_task", { task: "Open Settings", target: "computer" })
+      .level,
+    "destructive",
   );
   assert.deepEqual(getToolPermissionRequest("delete_task", { query: "Old task" }), {
     toolName: "delete_task",

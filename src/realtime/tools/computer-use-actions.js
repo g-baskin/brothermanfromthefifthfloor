@@ -129,10 +129,22 @@ async function executeComputerAction(target, action) {
       );
       break;
     case "keypress": {
-      const keys = Array.isArray(action.keys) ? action.keys : [action.key];
-      for (const key of keys) {
-        await target.keyboard.press(normalizeKey(key));
-      }
+      const keys = (Array.isArray(action.keys) ? action.keys : [action.key]).map(normalizeKey);
+      const mainKeys = keys.filter((key) => !modifierKeys.has(key));
+      // Hold modifiers down as a chord (e.g. Meta+T, Control+A) and press the
+      // remaining keys inside, instead of tapping each key independently — the
+      // latter leaks the literal letter of shortcuts like Cmd+T as text.
+      await withModifiers(target, keys, async () => {
+        if (mainKeys.length === 0) {
+          for (const key of keys) {
+            await target.keyboard.press(key);
+          }
+          return;
+        }
+        for (const key of mainKeys) {
+          await target.keyboard.press(key);
+        }
+      });
       break;
     }
     case "type":

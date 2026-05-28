@@ -51,10 +51,39 @@ test("executeComputerActions handles mouse, keyboard, wait, and screenshot actio
     ["dblclick", 30, 40, { button: "left" }],
     ["move", 50, 60],
     ["wheel", 0, -400],
+    ["down", "Control"],
     ["press", "Enter"],
-    ["press", "Control"],
+    ["up", "Control"],
     ["type", "hello"],
     ["wait", 25],
+  ]);
+});
+
+test("executeComputerActions presses modifier+key shortcuts as a held chord", async () => {
+  const calls = [];
+  const target = createFakeTarget(calls);
+
+  await executeComputerActions(target, [{ type: "keypress", keys: ["Meta", "t"] }]);
+
+  // Cmd+T must hold Meta and press t inside it — not tap them separately, which
+  // would leak a literal "t" into the focused field.
+  assert.deepEqual(calls, [
+    ["down", "Meta"],
+    ["press", "t"],
+    ["up", "Meta"],
+  ]);
+});
+
+test("executeComputerActions taps a lone modifier keypress", async () => {
+  const calls = [];
+  const target = createFakeTarget(calls);
+
+  await executeComputerActions(target, [{ type: "keypress", keys: ["Shift"] }]);
+
+  assert.deepEqual(calls, [
+    ["down", "Shift"],
+    ["press", "Shift"],
+    ["up", "Shift"],
   ]);
 });
 

@@ -13,6 +13,37 @@ const sourceAliasState = {
   aliases: new Map(),
 };
 
+export async function capturePrimaryScreenPng(options = {}) {
+  const sources = await getCapturerSources({ withThumbnails: true }, options);
+  const selected = selectPrimaryScreenSource(sources, options);
+  if (!selected) {
+    throw new Error("No primary screen source was found for capture.");
+  }
+  let image = selected.thumbnail;
+  if (image.isEmpty()) {
+    throw new Error(
+      "Screen capture returned an empty image. On macOS, grant Screen Recording permission to Brah/Electron.",
+    );
+  }
+  const resizeTo = options.resizeTo;
+  if (
+    isRecord(resizeTo) &&
+    Number.isFinite(resizeTo.width) &&
+    Number.isFinite(resizeTo.height) &&
+    resizeTo.width > 0 &&
+    resizeTo.height > 0 &&
+    typeof image.resize === "function"
+  ) {
+    image = image.resize({
+      width: Math.round(resizeTo.width),
+      height: Math.round(resizeTo.height),
+      quality: "good",
+    });
+  }
+  const size = image.getSize();
+  return { png: image.toPNG(), width: size.width, height: size.height };
+}
+
 export async function executeScreenshotTool(name, args, options = {}) {
   switch (name) {
     case "list_screenshot_sources":

@@ -16,6 +16,8 @@ const expectedToolNames = [
   "take_screenshot",
   "analyze_screen",
   "computer_use_task",
+  "cancel_computer_use",
+  "end_call",
 ];
 
 test("Realtime tool definitions expose every active function exactly once", () => {
@@ -35,6 +37,11 @@ test("tool definitions are function schemas with object parameters", () => {
     assert.equal(tool.parameters.additionalProperties, false, tool.name);
     assert.ok(Array.isArray(tool.parameters.required), tool.name);
   }
+});
+
+test("computer_use_task target enum offers browser and computer modes", () => {
+  const tool = getRealtimeToolDefinitions().find((item) => item.name === "computer_use_task");
+  assert.deepEqual(tool.parameters.properties.target.enum, ["browser", "computer"]);
 });
 
 test("returned tool definitions are cloned to prevent caller mutation", () => {

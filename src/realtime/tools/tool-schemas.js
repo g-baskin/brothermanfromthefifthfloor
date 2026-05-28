@@ -222,7 +222,7 @@ export const realtimeToolDefinitions = Object.freeze([
     type: "function",
     name: "computer_use_task",
     description:
-      "Start a browser computer-use task in an isolated automation harness when Ken asks you to operate a browser/UI.",
+      "Run a computer-use task. Use target 'browser' for an isolated automation browser harness, or target 'computer' to operate Ken's real desktop (live screen plus OS mouse and keyboard) when he asks you to control the actual machine. OS mode requires Screen Recording and Accessibility permissions.",
     parameters: {
       type: "object",
       properties: {
@@ -233,7 +233,7 @@ export const realtimeToolDefinitions = Object.freeze([
         },
         target: {
           type: "string",
-          enum: ["browser"],
+          enum: ["browser", "computer"],
         },
         url: {
           type: "string",
@@ -250,6 +250,31 @@ export const realtimeToolDefinitions = Object.freeze([
         },
       },
       required: ["task"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "cancel_computer_use",
+    description:
+      "Stop the currently running computer_use_task when Ken asks to stop/cancel computer use, or when the task should be aborted.",
+    parameters: emptyObjectParameters,
+  },
+  {
+    type: "function",
+    name: "end_call",
+    description:
+      "End the current voice call and hang up when Ken says goodbye, asks to end/stop the call, or the conversation is clearly finished. Say a short goodbye first, then call this.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Optional short reason for ending the call, such as 'Ken said goodbye'.",
+          maxLength: 120,
+        },
+      },
+      required: [],
       additionalProperties: false,
     },
   },

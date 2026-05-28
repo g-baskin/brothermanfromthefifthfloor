@@ -1,6 +1,7 @@
 import { executeComputerUseTool } from "./computer-use-tools.js";
 import { executePlannerTool } from "./planner-tools.js";
 import { executeScreenshotTool } from "./screenshot-tools.js";
+import { executeSessionTool } from "./session-tools.js";
 import { getRealtimeToolDefinitions } from "./tool-schemas.js";
 import { executeWebTool } from "./web-tools.js";
 
@@ -25,6 +26,11 @@ export async function executeRealtimeTool(name, args = {}, options = {}) {
   const computerResult = await executeComputerUseTool(name, args, options.computerUse);
   if (computerResult) {
     return computerResult;
+  }
+
+  const sessionResult = await executeSessionTool(name, args, options.session);
+  if (sessionResult) {
+    return sessionResult;
   }
 
   return {

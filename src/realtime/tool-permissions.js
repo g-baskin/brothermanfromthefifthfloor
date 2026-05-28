@@ -62,7 +62,13 @@ const toolPermissionMetadata = Object.freeze({
   computer_use_task: {
     level: "sensitive",
     label: "Use computer",
-    description: "Open an automated browser and let OpenAI operate it with screenshots.",
+    description:
+      "Let OpenAI operate a browser harness or, in OS mode, control the real machine's mouse and keyboard from screenshots.",
+  },
+  end_call: {
+    level: "low",
+    label: "End call",
+    description: "Hang up and end the current voice call.",
   },
 });
 
@@ -75,7 +81,7 @@ export function getToolPermissionRequest(name, args = {}) {
   return {
     toolName: name,
     label: metadata.label,
-    level: metadata.level,
+    level: resolveToolLevel(name, metadata.level, args),
     description: metadata.description,
     summary: summarizeToolRequest(name, args),
   };
@@ -99,6 +105,13 @@ export function formatPermissionPrompt(request) {
   return parts.join("\n\n");
 }
 
+function resolveToolLevel(name, level, args) {
+  if (name === "computer_use_task" && isRecord(args) && args.target === "computer") {
+    return "destructive";
+  }
+  return level;
+}
+
 function summarizeToolRequest(name, args) {
   switch (name) {
     case "add_task":
@@ -118,7 +131,9 @@ function summarizeToolRequest(name, args) {
     case "analyze_screen":
       return summarizeFields(args, ["target", "source_id", "reason", "question"]);
     case "computer_use_task":
-      return summarizeFields(args, ["task", "url", "autonomy", "maxSteps"]);
+      return summarizeFields(args, ["task", "target", "url", "autonomy", "maxSteps"]);
+    case "end_call":
+      return summarizeFields(args, ["reason"]);
     default:
       return "";
   }

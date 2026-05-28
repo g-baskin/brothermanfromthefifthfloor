@@ -28,7 +28,15 @@ export function parseToolArguments(rawArguments) {
   }
 }
 
-export function createRealtimeToolHandler({ executeTool, sendEvent, setMode, setStatus }) {
+export function createRealtimeToolHandler({
+  executeTool,
+  sendEvent,
+  setMode,
+  setStatus,
+  onEndCall,
+  onToolStart,
+  onToolEnd,
+}) {
   const handledToolCallIds = new Set();
 
   return {
@@ -47,7 +55,27 @@ export function createRealtimeToolHandler({ executeTool, sendEvent, setMode, set
       setStatus(formatToolStatus(toolCall.name));
       setMode("thinking");
 
-      const result = await executeToolSafely(executeTool, toolCall.name, toolCall.arguments);
+      if (toolCall.name === "end_call") {
+        // Ending the call is a renderer-side action (it owns the WebRTC peer).
+        // Acknowledge the tool call without requesting a new response so the
+        // model's goodbye finishes, then signal the host to hang up.
+        sendRealtimeToolOutput(
+          sendEvent,
+          toolCall.callId,
+          { status: "call_ended", message: "Ending the call." },
+          { createResponse: false },
+        );
+        await onEndCall?.(toolCall.arguments);
+        return true;
+      }
+
+      onToolStart?.(toolCall.name);
+      let result;
+      try {
+        result = await executeToolSafely(executeTool, toolCall.name, toolCall.arguments);
+      } finally {
+        onToolEnd?.(toolCall.name);
+      }
       if (isRecord(result?.realtimeInput)) {
         sendRealtimeToolOutput(sendEvent, toolCall.callId, createRealtimeImageToolOutput(result), {
           createResponse: false,
@@ -110,6 +138,8 @@ export function formatToolStatus(name) {
       return "Reading screen…";
     case "computer_use_task":
       return "Using computer…";
+    case "end_call":
+      return "Ending call…";
     case "add_task":
     case "list_tasks":
     case "delete_task":

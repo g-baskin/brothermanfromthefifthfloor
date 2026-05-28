@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -17,6 +18,7 @@ import {
 } from "electron";
 import electronUpdater from "electron-updater";
 import {
+  computerUseBrowserDocsUrl,
   createOsPermissionSnapshot,
   getMacOsPrivacySettingsUrl,
   getWindowsPrivacySettingsUrl,
@@ -29,6 +31,7 @@ import { listCalendarItems, listTasks } from "./realtime/tools/planner-store.js"
 
 const { autoUpdater } = electronUpdater;
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDevelopment = !app.isPackaged;
@@ -50,12 +53,15 @@ const realtimeDefaults = Object.freeze({
 });
 
 const windowModes = Object.freeze({
-  orb: { width: 172, height: 188 },
-  panel: { width: 440, height: 600 },
+  orb: { width: 172, height: 188, placement: "bottom-right" },
+  call: { width: 226, height: 52, placement: "bottom-center" },
+  panel: { width: 440, height: 600, placement: "bottom-right" },
 });
 
 let mainWindow;
 let windowMode = "panel";
+let windowFadeTimer = null;
+let activeComputerUseController = null;
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -94,21 +100,73 @@ function positionMainWindow(window, size) {
   window.setPosition(x, y, false);
 }
 
-function setMainWindowMode(mode) {
+async function setMainWindowMode(mode) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return windowMode;
   }
   const target = windowModes[mode] ?? windowModes.orb;
   windowMode = windowModes[mode] ? mode : "orb";
-  const display = screen.getPrimaryDisplay();
-  const x = Math.round(display.workArea.x + display.workArea.width - target.width - 24);
-  const y = Math.round(display.workArea.y + display.workArea.height - target.height - 24);
-  mainWindow.setMinimumSize(target.width, target.height);
-  mainWindow.setBounds(
-    { x, y, width: target.width, height: target.height },
-    process.platform === "darwin",
-  );
+  const targetBounds = getWindowBoundsForMode(target);
+  const currentBounds = mainWindow.getBounds();
+  const sizeChanged =
+    currentBounds.width !== targetBounds.width || currentBounds.height !== targetBounds.height;
+  if (sizeChanged) {
+    await fadeMainWindowTo(0, 110);
+  }
+  mainWindow.setMinimumSize(targetBounds.width, targetBounds.height);
+  mainWindow.setBounds(targetBounds, false);
+  if (sizeChanged) {
+    await fadeMainWindowTo(1, 130);
+  }
   return windowMode;
+}
+
+function getWindowBoundsForMode(target) {
+  const display = screen.getPrimaryDisplay();
+  const margin = target.placement === "bottom-center" ? 14 : 24;
+  const x =
+    target.placement === "bottom-center"
+      ? Math.round(display.workArea.x + (display.workArea.width - target.width) / 2)
+      : Math.round(display.workArea.x + display.workArea.width - target.width - margin);
+  return {
+    x,
+    y: Math.round(display.workArea.y + display.workArea.height - target.height - margin),
+    width: target.width,
+    height: target.height,
+  };
+}
+
+function fadeMainWindowTo(targetOpacity, duration) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return Promise.resolve();
+  }
+  if (windowFadeTimer !== null) {
+    clearInterval(windowFadeTimer);
+    windowFadeTimer = null;
+  }
+  const startOpacity = mainWindow.getOpacity();
+  const startedAt = Date.now();
+
+  return new Promise((resolve) => {
+    windowFadeTimer = setInterval(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        clearInterval(windowFadeTimer);
+        windowFadeTimer = null;
+        resolve();
+        return;
+      }
+      const progress = Math.min(1, (Date.now() - startedAt) / duration);
+      const eased = progress < 0.5 ? 2 * progress * progress : 1 - (-2 * progress + 2) ** 2 / 2;
+      const opacity = startOpacity + (targetOpacity - startOpacity) * eased;
+      mainWindow.setOpacity(Math.max(0.01, Math.min(1, opacity)));
+      if (progress >= 1) {
+        clearInterval(windowFadeTimer);
+        windowFadeTimer = null;
+        mainWindow.setOpacity(targetOpacity);
+        resolve();
+      }
+    }, 1000 / 60);
+  });
 }
 
 function wireUpdateEvents() {
@@ -179,7 +237,14 @@ ipcMain.handle("activity:list", (_event, kind) => listActivity(kind));
 ipcMain.handle("screenshots:list", () => listScreenshots());
 ipcMain.handle("screenshots:reveal", (_event, name) => revealScreenshot(name));
 ipcMain.handle("window:set-mode", (_event, mode) => setMainWindowMode(mode));
-ipcMain.handle("permissions:get-status", () => getOsPermissionStatus());
+ipcMain.handle("window:set-focusable", (_event, focusable) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  mainWindow.setFocusable(Boolean(focusable));
+  return Boolean(focusable);
+});
+ipcMain.handle("permissions:get-status", async () => getOsPermissionStatus());
 ipcMain.handle("permissions:request", async (_event, id) => requestOsPermission(id));
 ipcMain.handle("permissions:open-settings", async (_event, id) => openOsPermissionSettings(id));
 ipcMain.handle("diagnostics:get-log-path", () => getDiagnosticLogPath());
@@ -204,11 +269,16 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
   await writeDiagnosticLog("tool.execute.start", {
     tool: name,
     args: sanitizeDiagnosticValue(args),
-    permissions: summarizePermissionSnapshot(getOsPermissionStatus()),
+    permissions: summarizePermissionSnapshot(await getOsPermissionStatus()),
   });
+  const isComputerUse = name === "computer_use_task";
+  const abortController = isComputerUse ? new AbortController() : null;
+  if (abortController) {
+    activeComputerUseController?.abort();
+    activeComputerUseController = abortController;
+  }
   try {
-    const needsOpenAI = name === "computer_use_task";
-    const credentials = needsOpenAI ? await getFreshOpenAICredentials() : null;
+    const credentials = isComputerUse ? await getFreshOpenAICredentials() : null;
     const screenshotOptions = {
       desktopCapturer,
       screen,
@@ -218,9 +288,25 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
     };
     const result = await executeRealtimeTool(name, args, {
       screenshot: screenshotOptions,
-      computerUse: credentials
-        ? { openAI: { accessToken: credentials.accessToken }, logger: createToolLogger(name) }
-        : { logger: createToolLogger(name) },
+      computerUse: {
+        ...(credentials
+          ? {
+              openAI: {
+                accessToken: credentials.accessToken,
+                accountId: credentials.accountId,
+              },
+            }
+          : {}),
+        originator: "ggcoder",
+        logger: createToolLogger(name),
+        desktopCapturer,
+        screen,
+        ensureOsControlAllowed,
+        signal: abortController?.signal,
+      },
+      session: {
+        cancelComputerUse,
+      },
     });
     await writeDiagnosticLog("tool.execute.finish", {
       tool: name,
@@ -240,8 +326,22 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
       status: "error",
       message: error instanceof Error ? error.message : "Tool execution failed.",
     };
+  } finally {
+    if (abortController && activeComputerUseController === abortController) {
+      activeComputerUseController = null;
+    }
   }
 });
+
+ipcMain.handle("tools:cancel-computer-use", () => cancelComputerUse());
+
+function cancelComputerUse() {
+  if (activeComputerUseController) {
+    activeComputerUseController.abort();
+    return { cancelled: true };
+  }
+  return { cancelled: false };
+}
 
 app.whenReady().then(() => {
   wireUpdateEvents();
@@ -458,7 +558,7 @@ async function collectPrivacyDiagnostics() {
     isPackaged: app.isPackaged,
     bundleIdentifier: app.getApplicationNameForProtocol("file") || null,
     statuses: Object.fromEntries(
-      getOsPermissionStatus().map((permission) => [permission.id, permission.status]),
+      (await getOsPermissionStatus()).map((permission) => [permission.id, permission.status]),
     ),
     tccRows: process.platform === "darwin" ? await readMacOsTccRows() : [],
   };
@@ -487,11 +587,12 @@ async function readMacOsTccRows() {
   }
 }
 
-function getOsPermissionStatus() {
+async function getOsPermissionStatus() {
   return createOsPermissionSnapshot({
     microphone: getMediaAccessStatus("microphone"),
     screen: getMediaAccessStatus("screen"),
     accessibility: getAccessibilityStatus(),
+    computer: await getComputerUseBrowserStatus(),
   });
 }
 
@@ -513,6 +614,10 @@ async function requestOsPermission(id) {
     systemPreferences.isTrustedAccessibilityClient(true);
     return getOsPermissionStatus();
   }
+  if (id === "computer") {
+    await installComputerUseBrowser();
+    return getOsPermissionStatus();
+  }
   await openOsPermissionSettings(id);
   return getOsPermissionStatus();
 }
@@ -520,6 +625,10 @@ async function requestOsPermission(id) {
 async function openOsPermissionSettings(id) {
   if (!isKnownOsPermissionId(id)) {
     throw new Error("Unknown OS permission.");
+  }
+  if (id === "computer") {
+    await shell.openExternal(computerUseBrowserDocsUrl);
+    return { opened: true };
   }
   if (process.platform === "darwin") {
     await shell.openExternal(getMacOsPrivacySettingsUrl(id));
@@ -555,11 +664,56 @@ function getMediaAccessStatus(mediaType) {
   }
 }
 
+function ensureOsControlAllowed() {
+  const screenGranted = getMediaAccessStatus("screen") === "granted";
+  const accessibilityGranted = getAccessibilityStatus() === "granted";
+  if (screenGranted && accessibilityGranted) {
+    return { ok: true };
+  }
+  const missing = [
+    screenGranted ? "" : "Screen Recording",
+    accessibilityGranted ? "" : "Accessibility Control",
+  ].filter(Boolean);
+  return {
+    ok: false,
+    message: `Grant ${missing.join(" and ")} in the permissions screen before controlling the computer.`,
+  };
+}
+
 function getAccessibilityStatus() {
   if (process.platform !== "darwin") {
     return "unsupported";
   }
   return systemPreferences.isTrustedAccessibilityClient(false) ? "granted" : "not-determined";
+}
+
+async function getComputerUseBrowserStatus() {
+  try {
+    const { chromium } = await import("playwright");
+    const executablePath = chromium.executablePath();
+    return executablePath && existsSync(executablePath) ? "granted" : "not-determined";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function installComputerUseBrowser() {
+  let cliPath;
+  try {
+    cliPath = require.resolve("playwright/cli.js");
+  } catch {
+    throw new Error("Playwright is not installed. Run `npm install` then retry.");
+  }
+  try {
+    await execFileAsync(process.execPath, [cliPath, "install", "chromium"], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      timeout: 300_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? error.message : String(error);
+    throw new Error(`Failed to install the automation browser: ${detail}`);
+  }
 }
 
 async function loginOpenAI() {

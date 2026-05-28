@@ -410,18 +410,22 @@ export function createPanelController({ brah, onModeChange } = {}) {
     await loadActiveTab();
   }
 
-  async function close() {
+  async function close({ windowMode = "orb" } = {}) {
     if (!isOpen) {
       return;
     }
     isOpen = false;
     panelElement.classList.remove("is-open");
-    panelElement.hidden = true;
     for (const button of toggleButtons) {
       button.setAttribute("aria-pressed", "false");
     }
     onModeChange?.("orb");
-    await bridge.setWindowMode("orb");
+    await bridge.setWindowMode(windowMode);
+    window.setTimeout(() => {
+      if (!isOpen) {
+        panelElement.hidden = true;
+      }
+    }, 160);
   }
 
   async function toggle() {

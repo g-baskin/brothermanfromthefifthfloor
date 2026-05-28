@@ -27,6 +27,8 @@ export async function createBrowserComputerTarget(options = {}) {
   }
 
   return {
+    // Playwright page coordinates match the viewport-sized screenshot 1:1.
+    displaySize: { width: viewport.width, height: viewport.height },
     actionTarget: {
       mouse: page.mouse,
       keyboard: page.keyboard,
@@ -37,6 +39,12 @@ export async function createBrowserComputerTarget(options = {}) {
     },
     async navigateTo(url) {
       await navigatePage(page, url);
+    },
+    async goBack() {
+      await page.goBack({ waitUntil: "domcontentloaded" });
+    },
+    async goForward() {
+      await page.goForward({ waitUntil: "domcontentloaded" });
     },
     async close() {
       await browser.close();
