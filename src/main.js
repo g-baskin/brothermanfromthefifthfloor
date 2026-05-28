@@ -23,7 +23,9 @@ import {
   isKnownOsPermissionId,
 } from "./os-permissions.js";
 import { buildRealtimeInstructions } from "./realtime/prompts.js";
+import { listActivity, recordActivity } from "./realtime/tools/activity-store.js";
 import { executeRealtimeTool, getRealtimeToolDefinitions } from "./realtime/tools/index.js";
+import { listCalendarItems, listTasks } from "./realtime/tools/planner-store.js";
 
 const { autoUpdater } = electronUpdater;
 const execFileAsync = promisify(execFile);
@@ -47,14 +49,20 @@ const realtimeDefaults = Object.freeze({
   sampleRate: 24_000,
 });
 
+const windowModes = Object.freeze({
+  orb: { width: 172, height: 188 },
+  panel: { width: 440, height: 600 },
+});
+
 let mainWindow;
+let windowMode = "panel";
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 172,
-    height: 188,
-    minWidth: 172,
-    minHeight: 188,
+    width: windowModes.panel.width,
+    height: windowModes.panel.height,
+    minWidth: windowModes.panel.width,
+    minHeight: windowModes.panel.height,
     frame: false,
     transparent: true,
     resizable: false,
@@ -69,7 +77,7 @@ function createMainWindow() {
     },
   });
 
-  positionMainWindowAsFab(mainWindow);
+  positionMainWindow(mainWindow, windowModes.panel);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -78,12 +86,29 @@ function createMainWindow() {
   });
 }
 
-function positionMainWindowAsFab(window) {
+function positionMainWindow(window, size) {
   const display = screen.getPrimaryDisplay();
-  const { width, height } = window.getBounds();
+  const { width, height } = size ?? window.getBounds();
   const x = Math.round(display.workArea.x + display.workArea.width - width - 24);
   const y = Math.round(display.workArea.y + display.workArea.height - height - 24);
   window.setPosition(x, y, false);
+}
+
+function setMainWindowMode(mode) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return windowMode;
+  }
+  const target = windowModes[mode] ?? windowModes.orb;
+  windowMode = windowModes[mode] ? mode : "orb";
+  const display = screen.getPrimaryDisplay();
+  const x = Math.round(display.workArea.x + display.workArea.width - target.width - 24);
+  const y = Math.round(display.workArea.y + display.workArea.height - target.height - 24);
+  mainWindow.setMinimumSize(target.width, target.height);
+  mainWindow.setBounds(
+    { x, y, width: target.width, height: target.height },
+    process.platform === "darwin",
+  );
+  return windowMode;
 }
 
 function wireUpdateEvents() {
@@ -148,6 +173,12 @@ ipcMain.handle("openai:create-realtime-secret", async (_event, options = {}) => 
   });
 });
 
+ipcMain.handle("planner:list-tasks", () => listTasks());
+ipcMain.handle("planner:list-calendar", () => listCalendarItems());
+ipcMain.handle("activity:list", (_event, kind) => listActivity(kind));
+ipcMain.handle("screenshots:list", () => listScreenshots());
+ipcMain.handle("screenshots:reveal", (_event, name) => revealScreenshot(name));
+ipcMain.handle("window:set-mode", (_event, mode) => setMainWindowMode(mode));
 ipcMain.handle("permissions:get-status", () => getOsPermissionStatus());
 ipcMain.handle("permissions:request", async (_event, id) => requestOsPermission(id));
 ipcMain.handle("permissions:open-settings", async (_event, id) => openOsPermissionSettings(id));
@@ -196,6 +227,8 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
       elapsedMs: Date.now() - startedAt,
       result: summarizeToolResult(result),
     });
+    await recordToolActivity(name, args, result);
+    broadcastDataChanged(categoryForTool(name));
     return result;
   } catch (error) {
     await writeDiagnosticLog("tool.execute.error", {
@@ -233,6 +266,124 @@ app.on("window-all-closed", () => {
 
 function getDiagnosticLogPath() {
   return path.join(app.getPath("userData"), "diagnostics.log");
+}
+
+function broadcastDataChanged(category) {
+  if (!category || !mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("data:changed", { category });
+}
+
+function categoryForTool(name) {
+  switch (name) {
+    case "add_task":
+    case "delete_task":
+    case "update_task_status":
+      return "tasks";
+    case "add_calendar_item":
+    case "delete_calendar_item":
+      return "calendar";
+    case "take_screenshot":
+    case "analyze_screen":
+      return "screenshots";
+    case "web_search":
+    case "web_fetch":
+      return "web";
+    case "computer_use_task":
+      return "computer";
+    default:
+      return null;
+  }
+}
+
+async function recordToolActivity(name, args, result) {
+  if (!isRecord(result)) {
+    return;
+  }
+  try {
+    if (name === "web_search") {
+      await recordActivity({
+        kind: "web_search",
+        query: typeof result.query === "string" ? result.query : args?.query,
+        resultCount: result.resultCount,
+        results: result.results,
+      });
+      return;
+    }
+    if (name === "web_fetch") {
+      await recordActivity({
+        kind: "web_fetch",
+        url: result.url ?? args?.url,
+        title: result.title,
+        text: result.text,
+      });
+      return;
+    }
+    if (name === "computer_use_task") {
+      await recordActivity({
+        kind: "computer_use",
+        task: typeof args?.task === "string" ? args.task : "",
+        statusText: result.status,
+        steps: result.steps,
+        finalText: result.finalText,
+      });
+    }
+  } catch (error) {
+    console.warn("Failed to record activity", error);
+  }
+}
+
+async function listScreenshots() {
+  const screenshotsDir = path.join(app.getPath("userData"), "screenshots");
+  let names;
+  try {
+    names = await fs.readdir(screenshotsDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const pngNames = names.filter((name) => name.toLowerCase().endsWith(".png"));
+  const entries = await Promise.all(
+    pngNames.map(async (name) => {
+      const filePath = path.join(screenshotsDir, name);
+      try {
+        const [stats, bytes] = await Promise.all([fs.stat(filePath), fs.readFile(filePath)]);
+        return {
+          name,
+          dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
+          createdAt: stats.mtimeMs,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return entries
+    .filter(Boolean)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 30);
+}
+
+async function revealScreenshot(name) {
+  if (
+    typeof name !== "string" ||
+    !name ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    name.includes("..")
+  ) {
+    throw new Error("Invalid screenshot name.");
+  }
+  const screenshotsDir = path.join(app.getPath("userData"), "screenshots");
+  const filePath = path.join(screenshotsDir, name);
+  if (path.dirname(filePath) !== screenshotsDir) {
+    throw new Error("Invalid screenshot path.");
+  }
+  shell.showItemInFolder(filePath);
+  return { revealed: true };
 }
 
 async function writeDiagnosticLog(event, details = {}) {

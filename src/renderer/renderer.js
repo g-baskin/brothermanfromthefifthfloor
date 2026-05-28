@@ -1,10 +1,15 @@
+import { createPanelController } from "./panel.js";
 import { createRealtimeToolHandler } from "./realtime-tool-handler.js";
 
 const appShellElement = document.querySelector("#app-shell");
 const statusElement = document.querySelector("#status");
 const connectOpenAIButton = document.querySelector("#connect-openai");
+const menuToggleButton = document.querySelector("#menu-toggle");
+const appMenuElement = document.querySelector("#app-menu");
+const openAIIndicatorElement = document.querySelector("#openai-indicator");
 const permissionsToggleButton = document.querySelector("#permissions-toggle");
 const permissionsPanelElement = document.querySelector("#permissions-panel");
+const permissionsBackButton = document.querySelector("#permissions-back");
 const permissionsRefreshButton = document.querySelector("#permissions-refresh");
 const diagnosticsOpenButton = document.querySelector("#diagnostics-open");
 const permissionsListElement = document.querySelector("#permissions-list");
@@ -32,6 +37,15 @@ function setMode(mode) {
   appShellElement.dataset.mode = mode;
 }
 
+function setMenuOpen(open) {
+  appMenuElement.hidden = !open;
+  menuToggleButton.setAttribute("aria-expanded", String(open));
+}
+
+function toggleMenu() {
+  setMenuOpen(appMenuElement.hidden);
+}
+
 function setOrbLevel(level) {
   const normalized = Math.max(0, Math.min(level, 1));
   appShellElement.style.setProperty("--orb-level", normalized.toFixed(3));
@@ -39,8 +53,10 @@ function setOrbLevel(level) {
 
 function setOpenAIConnected(connected) {
   isOpenAIConnected = connected;
-  connectOpenAIButton.textContent = connected ? "Reconnect" : "Connect";
+  connectOpenAIButton.textContent = connected ? "Reconnect OpenAI" : "Connect OpenAI";
   connectOpenAIButton.disabled = false;
+  openAIIndicatorElement.textContent = connected ? "Connected" : "Offline";
+  openAIIndicatorElement.dataset.connected = String(connected);
   callToggleButton.disabled = !connected;
   appShellElement.classList.toggle("is-authorized", connected);
   if (!connected) {
@@ -70,9 +86,10 @@ async function refreshOsPermissions() {
 
 function renderOsPermissions(permissions) {
   permissionsListElement.replaceChildren(
-    ...permissions.map((permission) => {
+    ...permissions.map((permission, index) => {
       const item = document.createElement("article");
       item.className = "permission-item";
+      item.style.setProperty("--stagger", String(index));
 
       const title = document.createElement("div");
       title.className = "permission-title";
@@ -481,12 +498,36 @@ function readAnalyserLevel({ analyser, data }) {
   return Math.min(1, Math.max(0, (rms - 0.015) * 8));
 }
 
-connectOpenAIButton.addEventListener("click", connectOpenAI);
+menuToggleButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleMenu();
+});
+document.addEventListener("click", (event) => {
+  if (appMenuElement.hidden) {
+    return;
+  }
+  if (!appMenuElement.contains(event.target) && event.target !== menuToggleButton) {
+    setMenuOpen(false);
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !appMenuElement.hidden) {
+    setMenuOpen(false);
+  }
+});
+connectOpenAIButton.addEventListener("click", () => {
+  setMenuOpen(false);
+  void connectOpenAI();
+});
 permissionsToggleButton.addEventListener("click", () => {
+  setMenuOpen(false);
   permissionsPanelElement.hidden = !permissionsPanelElement.hidden;
   if (!permissionsPanelElement.hidden) {
     void refreshOsPermissions();
   }
+});
+permissionsBackButton.addEventListener("click", () => {
+  permissionsPanelElement.hidden = true;
 });
 permissionsRefreshButton.addEventListener("click", () => {
   void refreshOsPermissions();
@@ -494,6 +535,14 @@ permissionsRefreshButton.addEventListener("click", () => {
 diagnosticsOpenButton.addEventListener("click", () => {
   void window.brah.openDiagnosticLog();
 });
+const panelController = createPanelController({
+  brah: window.brah,
+  onModeChange: (mode) => {
+    appShellElement.dataset.panel = mode === "panel" ? "open" : "closed";
+  },
+});
+panelController.init({ openByDefault: true });
+
 callToggleButton.addEventListener("click", toggleCall);
 setOrbLevel(0);
 

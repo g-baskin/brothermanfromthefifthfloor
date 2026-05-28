@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.openai.com; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.openai.com; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Brah</title>
@@ -18,17 +18,71 @@
     <script type="module" src="./renderer.js"></script>
   </head>
   <body>
-    <main id="app-shell" class="app-shell" data-mode="idle">
-      <button id="connect-openai" type="button" class="oauth-button">Connect OpenAI</button>
-      <button id="permissions-toggle" type="button" class="permissions-button">Perms</button>
-      <section id="permissions-panel" class="permissions-panel" hidden aria-label="OS permissions">
-        <div class="permissions-heading">
-          <strong>OS permissions</strong>
-          <button id="permissions-refresh" type="button">Refresh</button>
-          <button id="diagnostics-open" type="button">Log</button>
+    <main id="app-shell" class="app-shell" data-mode="idle" data-panel="open">
+      <section id="panel" class="panel" hidden aria-label="Brah activity">
+        <header class="panel-header">
+          <button
+            id="menu-toggle"
+            type="button"
+            class="menu-button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-label="Open menu"
+          >
+            <span class="menu-glyph" aria-hidden="true"></span>
+          </button>
+          <span class="panel-title">Brah</span>
+          <span id="openai-indicator" class="openai-indicator" data-connected="false"
+            >Offline</span
+          >
+        </header>
+        <div id="app-menu" class="app-menu" hidden role="menu" aria-label="Brah menu">
+          <button id="connect-openai" type="button" class="menu-item" role="menuitem">
+            Connect OpenAI
+          </button>
+          <button id="permissions-toggle" type="button" class="menu-item" role="menuitem">
+            Permissions
+          </button>
+          <button
+            id="panel-toggle"
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            data-panel-toggle
+            aria-pressed="true"
+          >
+            Collapse to orb
+          </button>
         </div>
-        <div id="permissions-list" class="permissions-list"></div>
+        <section
+          id="permissions-panel"
+          class="permissions-panel"
+          hidden
+          aria-label="OS permissions"
+        >
+          <div class="view-header">
+            <button id="permissions-back" type="button" class="view-back" aria-label="Back">
+              ‹
+            </button>
+            <strong class="view-title">OS permissions</strong>
+            <button id="permissions-refresh" type="button">Refresh</button>
+            <button id="diagnostics-open" type="button">Log</button>
+          </div>
+          <div id="permissions-list" class="permissions-list"></div>
+        </section>
+        <nav id="panel-tabs" class="panel-tabs" role="tablist" aria-label="Activity tabs"></nav>
+        <div id="panel-body" class="panel-body" role="tabpanel"></div>
+        <footer id="panel-footer" class="panel-footer"></footer>
       </section>
+      <button
+        id="orb-expand"
+        type="button"
+        class="orb-expand"
+        data-panel-toggle
+        aria-label="Open panel"
+      >
+        <span class="menu-glyph" aria-hidden="true"></span>
+      </button>
       <button id="call-toggle" type="button" class="fab-orb" disabled aria-pressed="false">
         <span class="orb-shadow" aria-hidden="true"></span>
         <span class="siri-orb" aria-hidden="true">

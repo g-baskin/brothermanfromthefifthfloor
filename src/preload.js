@@ -14,4 +14,18 @@ contextBridge.exposeInMainWorld("brah", {
   getPrivacyDiagnostics: () => ipcRenderer.invoke("diagnostics:privacy"),
   getRealtimeTools: () => ipcRenderer.invoke("tools:get-definitions"),
   executeRealtimeTool: (name, args) => ipcRenderer.invoke("tools:execute", name, args),
+  getPlannerTasks: () => ipcRenderer.invoke("planner:list-tasks"),
+  getCalendarItems: () => ipcRenderer.invoke("planner:list-calendar"),
+  listScreenshots: () => ipcRenderer.invoke("screenshots:list"),
+  revealScreenshot: (name) => ipcRenderer.invoke("screenshots:reveal", name),
+  getActivity: (kind) => ipcRenderer.invoke("activity:list", kind),
+  setWindowMode: (mode) => ipcRenderer.invoke("window:set-mode", mode),
+  onDataChanged: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("data:changed", listener);
+    return listener;
+  },
+  offDataChanged: (listener) => {
+    ipcRenderer.removeListener("data:changed", listener);
+  },
 });
