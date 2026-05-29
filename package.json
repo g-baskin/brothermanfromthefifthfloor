@@ -17,7 +17,7 @@
     "electron"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "build": {
     "appId": "com.unstablemind.brah",
