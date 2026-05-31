@@ -2153,11 +2153,10 @@ async function createMobileRealtimeVoiceConversationSession(
     },
     cancelResponse() {
       const events = playbackTracker.interrupt();
-      const clientEvents = events.filter((event) => event.type === "response.cancel");
-      if (clientEvents.length === 0) {
-        return { cancelled: false, events: clientEvents };
+      if (events.length === 0) {
+        return { cancelled: false, events };
       }
-      for (const event of clientEvents) {
+      for (const event of events) {
         try {
           session.sendEvent(event);
         } catch (error) {
@@ -2169,7 +2168,7 @@ async function createMobileRealtimeVoiceConversationSession(
       sendMobileVoiceStreamEvent(streamContext, "voice.reply.cancelled", {
         turnId: streamContext.currentTurnId,
       });
-      return { cancelled: true, events: clientEvents };
+      return { cancelled: true, events };
     },
     close() {
       session.close();
@@ -2179,12 +2178,20 @@ async function createMobileRealtimeVoiceConversationSession(
 
 function handleMobileConversationRealtimeStatusEvent(streamContext, event) {
   if (event?.type === "input_audio_buffer.speech_started") {
+    void writeDiagnosticLog("mobile.voice.conversation.speech_started", {
+      conversationId: streamContext.conversationId,
+      turnId: streamContext.currentTurnId,
+    });
     sendMobileVoiceStreamEvent(streamContext, "voice.input.speech_started", {
       turnId: streamContext.currentTurnId,
     });
     return;
   }
   if (event?.type === "input_audio_buffer.speech_stopped") {
+    void writeDiagnosticLog("mobile.voice.conversation.speech_stopped", {
+      conversationId: streamContext.conversationId,
+      turnId: streamContext.currentTurnId,
+    });
     sendMobileVoiceStreamEvent(streamContext, "voice.input.speech_stopped", {
       turnId: streamContext.currentTurnId,
     });
@@ -2566,20 +2573,12 @@ function createMobileRealtimeSession(clientSecret, listeners = {}) {
     if (event?.type === "conversation.item.input_audio_transcription.completed") {
       const transcript = typeof event.transcript === "string" ? event.transcript.trim() : "";
       if (transcript) {
-        const response = getMobileRealtimeResponseAccumulator(responseId, { create: false });
-        const pending = response ? null : getPendingMobileRealtimeResponse(responseId);
-        if (response) {
-          response.inputTranscripts.push(transcript);
-        } else if (pending) {
-          pending.inputTranscripts.push(transcript);
-        } else {
-          pendingInputTurnId = event.item_id ?? randomUUID();
-          pendingInputTranscripts.push(transcript);
-        }
+        pendingInputTurnId = event.item_id ?? randomUUID();
+        pendingInputTranscripts.push(transcript);
         listeners.onInputTranscript?.({
           transcript,
           responseId,
-          turnId: response?.turnId ?? pendingInputTurnId,
+          turnId: pendingInputTurnId,
         });
       }
       return;

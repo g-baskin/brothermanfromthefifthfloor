@@ -46,7 +46,7 @@ npm start
 
 ## Notes
 
-- Live push-to-talk uses Expo SDK 56 `expo-audio` PCM streaming.
+- Realtime conversation voice uses Expo SDK 56 `expo-audio` PCM streaming.
 - The desktop bridge briefly binds to the Mac LAN IP while pairing, then returns to loopback after a device pairs or pairing is stopped.
 - Device credentials are stored in Android secure storage.
 - Expo Go is no longer the target runtime for this app.

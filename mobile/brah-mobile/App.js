@@ -473,147 +473,169 @@ export default function App() {
     streamingVoice,
   ]);
 
-  const handleVoiceStreamEvent = useCallback((message) => {
-    const payload = message?.payload ?? {};
-    const activeTurn = activeVoiceTurnRef.current;
-    const payloadConversationId =
-      typeof payload.conversationId === "string" ? payload.conversationId : null;
-    if (payloadConversationId && activeTurn?.conversationId !== payloadConversationId) {
-      return;
-    }
-    const turnId =
-      typeof payload.turnId === "string"
-        ? payload.turnId
-        : activeTurn?.currentTurnId || activeTurn?.turnId || activeTurn?.conversationId;
-    if (!turnId) {
-      return;
-    }
-    const voiceSession = activeTurn ?? { turnId };
-    activeVoiceTurnRef.current = voiceSession;
-
-    if (message.type === "voice.input.speech_started") {
-      const interruptedTurnId = voiceSession.currentTurnId ?? voiceSession.activeTurnId ?? turnId;
-      invalidateVoicePipelineTurn(interruptedTurnId).catch(() => {});
-      voicePipelineFirstChunkRef.current = true;
-      setStreamingVoice(false);
-      setVoiceSummary("Listening — go ahead.");
-      setStatusText("Listening — go ahead.");
-      return;
-    }
-
-    if (message.type === "voice.input.speech_stopped") {
-      setStatusText("Heard you. Brah replies when the pause is long enough…");
-      return;
-    }
-
-    if (message.type === "voice.reply.started") {
-      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
-      setStreamingVoice(true);
-      setVoiceReady(false);
-      setStatusText("Brah is answering…");
-      return;
-    }
-
-    if (message.type === "voice.reply.transcript") {
-      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
-      const transcript = cleanText(payload.transcript);
-      if (transcript) {
-        upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
-        setVoiceSummary(`You: ${transcript}\nBrah: …`);
-        setStatusText("Desktop transcribed your voice. Brah is answering…");
+  const handleVoiceStreamEvent = useCallback(
+    (message) => {
+      const payload = message?.payload ?? {};
+      const activeTurn = activeVoiceTurnRef.current;
+      const payloadConversationId =
+        typeof payload.conversationId === "string" ? payload.conversationId : null;
+      if (payloadConversationId && activeTurn?.conversationId !== payloadConversationId) {
+        return;
       }
-      return;
-    }
+      const turnId =
+        typeof payload.turnId === "string"
+          ? payload.turnId
+          : activeTurn?.currentTurnId || activeTurn?.turnId || activeTurn?.conversationId;
+      if (!turnId) {
+        return;
+      }
+      const voiceSession = activeTurn ?? { turnId };
+      activeVoiceTurnRef.current = voiceSession;
 
-    if (message.type === "voice.reply.delta") {
-      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
-      const delta = typeof payload.delta === "string" ? payload.delta : "";
-      if (delta) {
-        upsertChatMessageById(
-          setChatMessages,
-          voiceSession.assistantMessageId,
-          "assistant",
-          delta,
-          {
-            append: true,
-          },
+      if (message.type === "voice.input.speech_started") {
+        const interruptedTurnId = voiceSession.currentTurnId ?? voiceSession.activeTurnId ?? turnId;
+        const shouldCancelResponse = Boolean(
+          voiceSession.conversationId && voiceSession.currentTurnId,
         );
+        invalidateVoicePipelineTurn(interruptedTurnId).catch(() => {});
+        if (shouldCancelResponse) {
+          sendBridgeRequest(
+            {
+              type: "voice.conversation.cancel_response",
+              conversationId: voiceSession.conversationId,
+            },
+            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.conversation.response_cancelled" },
+          ).catch(() => {});
+        }
+        voicePipelineFirstChunkRef.current = true;
+        setStreamingVoice(false);
+        setVoiceSummary("Listening — go ahead.");
+        setStatusText("Listening — go ahead.");
+        return;
+      }
+
+      if (message.type === "voice.input.speech_stopped") {
+        setStatusText("Heard you. Brah replies when the pause is long enough…");
+        return;
+      }
+
+      if (message.type === "voice.reply.started") {
+        startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
         setStreamingVoice(true);
-        setVoiceSummary("Brah is streaming a reply…");
-        setStatusText("Streaming Brah’s response from desktop…");
-      }
-      return;
-    }
-
-    if (message.type === "voice.reply.audio_delta") {
-      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
-      const audioChunk = payload.audio?.base64;
-      voiceSession.audioChunks = [...(voiceSession.audioChunks ?? []), audioChunk].filter(Boolean);
-      if (audioChunk) {
-        const playedStreamingAudio = pushVoicePipelineAudio(
-          audioChunk,
-          turnId,
-          voicePipelineConnectedRef,
-          voicePipelineTurnRef,
-          voicePipelineFirstChunkRef,
-        );
-        voiceSession.playedStreamingAudio =
-          voiceSession.playedStreamingAudio || playedStreamingAudio;
-      }
-      setStreamingVoice(true);
-      setStatusText("Playing streaming audio from desktop Brah…");
-      return;
-    }
-
-    if (message.type === "voice.reply.tool") {
-      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
-      const name = cleanText(payload.name) || "desktop tool";
-      const action = payload.status === "end" ? "Finished" : "Using";
-      setVoiceSummary(`${action} ${name}…`);
-      setStatusText(`${action} ${name} on desktop…`);
-      return;
-    }
-
-    if (message.type === "voice.reply.cancelled") {
-      invalidateVoicePipelineTurn(turnId).catch(() => {});
-      finishConversationTurn(voiceSession, turnId);
-      setStreamingVoice(false);
-      setStatusText("Response cancelled; still listening.");
-      return;
-    }
-
-    if (message.type === "voice.reply.error") {
-      const errorMessage = cleanText(payload.message) || "Voice response failed.";
-      setStreamingVoice(false);
-      setVoiceSummary(`Voice error: ${errorMessage}`);
-      setStatusText(errorMessage);
-      return;
-    }
-
-    if (message.type === "voice.reply.done") {
-      const reply = cleanText(payload.reply);
-      const transcript = cleanText(payload.transcript);
-      if (transcript && voiceSession.userMessageId) {
-        upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
-      }
-      if (reply && voiceSession.assistantMessageId) {
-        upsertChatMessageById(setChatMessages, voiceSession.assistantMessageId, "assistant", reply);
-      }
-      markVoicePipelineTurnComplete(turnId, voicePipelineFirstChunkRef);
-      finishConversationTurn(voiceSession, turnId);
-      if (payload.audio?.base64) {
-        void playAssistantAudio(payload.audio, voicePlayerRef, {
-          autoplay: !voiceSession.playedStreamingAudio,
-        });
-        setVoiceReady(true);
-      } else {
         setVoiceReady(false);
+        setStatusText("Brah is answering…");
+        return;
       }
-      setStreamingVoice(false);
-      setVoiceSummary(reply ? `Brah: ${reply}` : "Listening — speak naturally.");
-      setStatusText("Brah finished. Still listening.");
-    }
-  }, []);
+
+      if (message.type === "voice.reply.transcript") {
+        startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
+        const transcript = cleanText(payload.transcript);
+        if (transcript) {
+          upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
+          setVoiceSummary(`You: ${transcript}\nBrah: …`);
+          setStatusText("Desktop transcribed your voice. Brah is answering…");
+        }
+        return;
+      }
+
+      if (message.type === "voice.reply.delta") {
+        startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
+        const delta = typeof payload.delta === "string" ? payload.delta : "";
+        if (delta) {
+          upsertChatMessageById(
+            setChatMessages,
+            voiceSession.assistantMessageId,
+            "assistant",
+            delta,
+            {
+              append: true,
+            },
+          );
+          setStreamingVoice(true);
+          setVoiceSummary("Brah is streaming a reply…");
+          setStatusText("Streaming Brah’s response from desktop…");
+        }
+        return;
+      }
+
+      if (message.type === "voice.reply.audio_delta") {
+        startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
+        const audioChunk = payload.audio?.base64;
+        voiceSession.audioChunks = [...(voiceSession.audioChunks ?? []), audioChunk].filter(
+          Boolean,
+        );
+        if (audioChunk) {
+          const playedStreamingAudio = pushVoicePipelineAudio(
+            audioChunk,
+            turnId,
+            voicePipelineConnectedRef,
+            voicePipelineTurnRef,
+            voicePipelineFirstChunkRef,
+          );
+          voiceSession.playedStreamingAudio =
+            voiceSession.playedStreamingAudio || playedStreamingAudio;
+        }
+        setStreamingVoice(true);
+        setStatusText("Playing streaming audio from desktop Brah…");
+        return;
+      }
+
+      if (message.type === "voice.reply.tool") {
+        startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
+        const name = cleanText(payload.name) || "desktop tool";
+        const action = payload.status === "end" ? "Finished" : "Using";
+        setVoiceSummary(`${action} ${name}…`);
+        setStatusText(`${action} ${name} on desktop…`);
+        return;
+      }
+
+      if (message.type === "voice.reply.cancelled") {
+        invalidateVoicePipelineTurn(turnId).catch(() => {});
+        finishConversationTurn(voiceSession, turnId);
+        setStreamingVoice(false);
+        setStatusText("Response cancelled; still listening.");
+        return;
+      }
+
+      if (message.type === "voice.reply.error") {
+        const errorMessage = cleanText(payload.message) || "Voice response failed.";
+        setStreamingVoice(false);
+        setVoiceSummary(`Voice error: ${errorMessage}`);
+        setStatusText(errorMessage);
+        return;
+      }
+
+      if (message.type === "voice.reply.done") {
+        const reply = cleanText(payload.reply);
+        const transcript = cleanText(payload.transcript);
+        if (transcript && voiceSession.userMessageId) {
+          upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
+        }
+        if (reply && voiceSession.assistantMessageId) {
+          upsertChatMessageById(
+            setChatMessages,
+            voiceSession.assistantMessageId,
+            "assistant",
+            reply,
+          );
+        }
+        markVoicePipelineTurnComplete(turnId, voicePipelineFirstChunkRef);
+        finishConversationTurn(voiceSession, turnId);
+        if (payload.audio?.base64) {
+          void playAssistantAudio(payload.audio, voicePlayerRef, {
+            autoplay: !voiceSession.playedStreamingAudio,
+          });
+          setVoiceReady(true);
+        } else {
+          setVoiceReady(false);
+        }
+        setStreamingVoice(false);
+        setVoiceSummary(reply ? `Brah: ${reply}` : "Listening — speak naturally.");
+        setStatusText("Brah finished. Still listening.");
+      }
+    },
+    [sendBridgeRequest],
+  );
 
   useEffect(() => {
     handleVoiceStreamEventRef.current = handleVoiceStreamEvent;

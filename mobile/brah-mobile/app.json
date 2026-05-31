@@ -20,7 +20,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Brah Mobile to record push-to-talk voice for desktop Brah.",
+          "microphonePermission": "Allow Brah Mobile to stream realtime conversation voice for desktop Brah.",
           "recordAudioAndroid": true,
           "enableBackgroundPlayback": false,
           "enableBackgroundRecording": false
