@@ -61,6 +61,14 @@ import {
   migrateLegacyPlannerStore,
 } from "./realtime/tools/planner-store.js";
 import { loadWindowPosition, saveWindowPosition } from "./realtime/tools/window-state-store.js";
+import {
+  createRealtimePlaybackTracker,
+  isBenignCancelError,
+} from "./renderer/realtime-playback.js";
+import {
+  createRealtimeResponseCoordinator,
+  isActiveResponseConflictError,
+} from "./renderer/realtime-response-queue.js";
 
 const { autoUpdater } = electronUpdater;
 const execFileAsync = promisify(execFile);
@@ -178,6 +186,7 @@ let activeComputerUseController = null;
 let mobileBridgeServer = null;
 let mobileBridgeHost = "127.0.0.1";
 const mobileVoiceStreams = new Map();
+const mobileVoiceConversations = new Map();
 let mobileDevServerProcess = null;
 let mobileDevServerPort = null;
 // User-chosen window position (set by dragging the panel), persisted across
@@ -637,10 +646,20 @@ function createMobileVoiceStreamContext(turnId, bridgeContext = {}) {
   };
 }
 
+function createMobileVoiceConversationContext(conversationId, bridgeContext = {}) {
+  return {
+    conversationId,
+    requestId: bridgeContext.requestId,
+    sendEvent: bridgeContext.sendEvent,
+    isOpen: bridgeContext.isOpen,
+  };
+}
+
 function createMobileVoiceRealtimeListeners(streamContext) {
   return {
-    onAudioDelta: ({ delta }) => {
+    onAudioDelta: ({ delta, turnId }) => {
       sendMobileVoiceStreamEvent(streamContext, "voice.reply.audio_delta", {
+        turnId: streamContext.turnId ?? turnId,
         audio: {
           base64: delta,
           format: "pcm16",
@@ -649,11 +668,17 @@ function createMobileVoiceRealtimeListeners(streamContext) {
         },
       });
     },
-    onTextDelta: ({ delta }) => {
-      sendMobileVoiceStreamEvent(streamContext, "voice.reply.delta", { delta });
+    onTextDelta: ({ delta, turnId }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.delta", {
+        turnId: streamContext.turnId ?? turnId,
+        delta,
+      });
     },
-    onInputTranscript: ({ transcript }) => {
-      sendMobileVoiceStreamEvent(streamContext, "voice.reply.transcript", { transcript });
+    onInputTranscript: ({ transcript, turnId }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.transcript", {
+        turnId: streamContext.turnId ?? turnId,
+        transcript,
+      });
     },
   };
 }
@@ -665,8 +690,11 @@ function sendMobileVoiceStreamEvent(streamContext, type, payload = {}) {
   if (typeof streamContext.isOpen === "function" && !streamContext.isOpen()) {
     return;
   }
+  const turnId = payload.turnId ?? streamContext.turnId;
+  const conversationId = payload.conversationId ?? streamContext.conversationId;
   streamContext.sendEvent(type, streamContext.requestId, {
-    turnId: streamContext.turnId,
+    ...(turnId ? { turnId } : {}),
+    ...(conversationId ? { conversationId } : {}),
     ...payload,
   });
 }
@@ -798,6 +826,90 @@ async function cancelMobileVoiceStream(turnId) {
   return { turnId: normalizedTurnId, cancelled: true };
 }
 
+async function startMobileVoiceConversation(conversationId, audio, history = [], context = {}) {
+  const normalizedConversationId = normalizeMobileVoiceConversationId(conversationId);
+  if (mobileVoiceConversations.has(normalizedConversationId)) {
+    throw new Error("Mobile voice conversation is already active.");
+  }
+  const streamAudio = normalizeMobileVoiceStreamAudio(audio);
+  const credentials = await requireFreshOpenAICredentialsForMobileVoice();
+  const streamContext = createMobileVoiceConversationContext(normalizedConversationId, context);
+  const session = await createMobileRealtimeVoiceConversationSession(
+    credentials,
+    streamAudio,
+    history,
+    streamContext,
+  );
+  mobileVoiceConversations.set(normalizedConversationId, {
+    conversationId: normalizedConversationId,
+    requestId: streamContext.requestId,
+    session,
+    streamContext,
+    byteLength: 0,
+    chunks: 0,
+    startedAt: Date.now(),
+  });
+  await writeDiagnosticLog("mobile.voice.conversation.start", {
+    conversationId: normalizedConversationId,
+    sampleRate: streamAudio.sampleRate,
+    channels: streamAudio.channels,
+  });
+  return { conversationId: normalizedConversationId, started: true };
+}
+
+async function appendMobileVoiceConversationAudio(conversationId, chunk, sequence) {
+  const normalizedConversationId = normalizeMobileVoiceConversationId(conversationId);
+  const active = mobileVoiceConversations.get(normalizedConversationId);
+  if (!active?.session?.appendAudio) {
+    throw new Error("Mobile voice conversation is not active.");
+  }
+  const normalizedChunk = normalizeMobileVoiceStreamChunk(chunk);
+  active.session.appendAudio(normalizedChunk);
+  active.byteLength += Buffer.from(normalizedChunk, "base64").length;
+  active.chunks += 1;
+  return { conversationId: normalizedConversationId, sequence, received: true };
+}
+
+async function stopMobileVoiceConversation(conversationId) {
+  const normalizedConversationId = normalizeMobileVoiceConversationId(conversationId);
+  const active = mobileVoiceConversations.get(normalizedConversationId);
+  if (!active) {
+    return { conversationId: normalizedConversationId, stopped: false };
+  }
+  mobileVoiceConversations.delete(normalizedConversationId);
+  const elapsedMs = Date.now() - (active.startedAt ?? Date.now());
+  try {
+    active.session.close?.();
+  } catch {}
+  await writeDiagnosticLog("mobile.voice.conversation.stop", {
+    conversationId: normalizedConversationId,
+    elapsedMs,
+    chunks: active.chunks,
+    bytes: active.byteLength,
+  });
+  return {
+    conversationId: normalizedConversationId,
+    stopped: true,
+    chunks: active.chunks,
+    byteLength: active.byteLength,
+    elapsedMs,
+  };
+}
+
+async function cancelMobileVoiceConversationResponse(conversationId) {
+  const normalizedConversationId = normalizeMobileVoiceConversationId(conversationId);
+  const active = mobileVoiceConversations.get(normalizedConversationId);
+  if (!active?.session?.cancelResponse) {
+    return { conversationId: normalizedConversationId, cancelled: false };
+  }
+  const result = active.session.cancelResponse();
+  return {
+    conversationId: normalizedConversationId,
+    cancelled: result.cancelled !== false,
+    interrupted: Array.isArray(result?.events) ? result.events.length : undefined,
+  };
+}
+
 async function requireFreshOpenAICredentialsForMobileVoice() {
   const credentials = await getFreshOpenAICredentials();
   if (!credentials) {
@@ -812,6 +924,14 @@ function normalizeMobileVoiceTurnId(turnId) {
     throw new Error("Mobile voice turn id is required.");
   }
   return normalizedTurnId;
+}
+
+function normalizeMobileVoiceConversationId(conversationId) {
+  const normalizedConversationId = typeof conversationId === "string" ? conversationId.trim() : "";
+  if (!normalizedConversationId) {
+    throw new Error("Mobile voice conversation id is required.");
+  }
+  return normalizedConversationId;
 }
 
 function normalizeMobileVoiceStreamAudio(audio) {
@@ -1053,6 +1173,10 @@ async function startMobileBridge(host = "127.0.0.1") {
       appendVoiceStreamAudio: appendMobileVoiceStreamAudio,
       endVoiceStream: endMobileVoiceStream,
       cancelVoiceStream: cancelMobileVoiceStream,
+      startVoiceConversation: startMobileVoiceConversation,
+      appendVoiceConversationAudio: appendMobileVoiceConversationAudio,
+      stopVoiceConversation: stopMobileVoiceConversation,
+      cancelVoiceConversationResponse: cancelMobileVoiceConversationResponse,
     },
     logger: {
       info: (message, details) => safeConsole("info", message, details),
@@ -1155,6 +1279,9 @@ async function stopMobileBridge() {
   }
   for (const turnId of mobileVoiceStreams.keys()) {
     await cancelMobileVoiceStream(turnId);
+  }
+  for (const conversationId of mobileVoiceConversations.keys()) {
+    await stopMobileVoiceConversation(conversationId);
   }
   const server = mobileBridgeServer;
   mobileBridgeServer = null;
@@ -1899,6 +2026,203 @@ async function runMobileVoiceResponse(credentials, audio, history = [], streamCo
   return runMobileRealtimePcmVoiceResponse(credentials, audio, history, streamContext);
 }
 
+async function createMobileRealtimeVoiceConversationSession(
+  credentials,
+  audio,
+  history = [],
+  streamContext = {},
+) {
+  const settings = await loadSettings();
+  const realtimeSettings = resolveRealtimeSettings(settings);
+  const instructions = buildMobileVoiceInstructions(settings);
+  const clientSecret = await createRealtimeClientSecret(credentials, {
+    instructions,
+    voice: realtimeSettings.voice,
+    speed: realtimeSettings.speed,
+  });
+  const responseCoordinator = createRealtimeResponseCoordinator();
+  const playbackTracker = createRealtimePlaybackTracker();
+  const session = createMobileRealtimeSession(clientSecret, {
+    ...createMobileVoiceRealtimeListeners(streamContext),
+    onRealtimeEvent: (event) => {
+      playbackTracker.observe(event);
+      const queuedCreate = responseCoordinator.observe(event);
+      if (queuedCreate) {
+        session.sendEvent(queuedCreate);
+      }
+      handleMobileConversationRealtimeStatusEvent(streamContext, event);
+    },
+    onResponseCreated: ({ turnId }) => {
+      streamContext.currentTurnId = turnId;
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.started", { turnId });
+    },
+    onInputTranscript: ({ transcript, turnId }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.transcript", { turnId, transcript });
+      void recordAssistantChatTurn({
+        role: "user",
+        content: transcript,
+        source: "mobile_voice",
+      });
+    },
+    onToolCall: ({ call, turnId }) => {
+      void handleMobileConversationToolCall(
+        session,
+        responseCoordinator,
+        streamContext,
+        call,
+        turnId,
+      );
+    },
+    onDone: (responseResult) => {
+      if (isRealtimeResponseCancelled(responseResult.response)) {
+        sendMobileVoiceStreamEvent(streamContext, "voice.reply.cancelled", {
+          turnId: responseResult.turnId,
+        });
+        return;
+      }
+      if (getRealtimeFunctionCalls(responseResult.response).length > 0) {
+        return;
+      }
+      const finalResult = {
+        ...createMobileVoiceTurnResult(responseResult),
+        conversationId: streamContext.conversationId,
+        turnId: responseResult.turnId,
+      };
+      if (finalResult.reply) {
+        void recordAssistantChatTurn({
+          role: "assistant",
+          content: finalResult.reply,
+          source: "mobile_voice",
+        });
+      }
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.done", finalResult);
+      if (streamContext.currentTurnId === responseResult.turnId) {
+        streamContext.currentTurnId = null;
+      }
+    },
+    onError: (error) => {
+      if (isBenignCancelError(error)) {
+        sendMobileVoiceStreamEvent(streamContext, "voice.reply.cancelled", {
+          turnId: streamContext.currentTurnId,
+        });
+        return;
+      }
+      if (isActiveResponseConflictError(error)) {
+        responseCoordinator.noteActiveResponseConflict();
+        return;
+      }
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.error", {
+        turnId: streamContext.currentTurnId,
+        message: error.message,
+      });
+    },
+  });
+  await session.connect();
+  await session.update({
+    instructions,
+    tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
+    tool_choice: "auto",
+    output_modalities: ["audio"],
+    audio: {
+      input: {
+        format: { type: "audio/pcm", rate: audio.sampleRate },
+        noise_reduction: { type: "near_field" },
+        transcription: { model: "gpt-4o-transcribe" },
+        turn_detection: {
+          type: "semantic_vad",
+          eagerness: "high",
+          create_response: true,
+          interrupt_response: true,
+        },
+      },
+      output: {
+        format: { type: "audio/pcm", rate: mobileVoiceDefaults.outputSampleRate },
+        voice: realtimeSettings.voice,
+        speed: realtimeSettings.speed,
+      },
+    },
+  });
+  for (const item of normalizeMobileAssistantHistory(history)) {
+    session.sendEvent({ type: "conversation.item.create", item });
+  }
+
+  return {
+    streamContext,
+    appendAudio(chunk) {
+      session.sendEvent({ type: "input_audio_buffer.append", audio: chunk });
+    },
+    cancelResponse() {
+      const events = playbackTracker.interrupt();
+      const clientEvents = events.filter((event) => event.type === "response.cancel");
+      if (clientEvents.length === 0) {
+        return { cancelled: false, events: clientEvents };
+      }
+      for (const event of clientEvents) {
+        try {
+          session.sendEvent(event);
+        } catch (error) {
+          if (!isBenignCancelError(error)) {
+            throw error;
+          }
+        }
+      }
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.cancelled", {
+        turnId: streamContext.currentTurnId,
+      });
+      return { cancelled: true, events: clientEvents };
+    },
+    close() {
+      session.close();
+    },
+  };
+}
+
+function handleMobileConversationRealtimeStatusEvent(streamContext, event) {
+  if (event?.type === "input_audio_buffer.speech_started") {
+    sendMobileVoiceStreamEvent(streamContext, "voice.input.speech_started", {
+      turnId: streamContext.currentTurnId,
+    });
+    return;
+  }
+  if (event?.type === "input_audio_buffer.speech_stopped") {
+    sendMobileVoiceStreamEvent(streamContext, "voice.input.speech_stopped", {
+      turnId: streamContext.currentTurnId,
+    });
+  }
+}
+
+async function handleMobileConversationToolCall(
+  session,
+  responseCoordinator,
+  streamContext,
+  call,
+  turnId,
+) {
+  const result = await executeMobileAssistantToolForVoice(call, {
+    ...streamContext,
+    turnId: turnId ?? streamContext.currentTurnId,
+  });
+  await sendMobileToolOutput(session, call, result);
+  const realtimeInputs = isRecord(result?.realtimeInput) ? [result.realtimeInput] : [];
+  const createEvent = {
+    type: "response.create",
+    response: {
+      output_modalities: ["audio"],
+      ...(realtimeInputs.length > 0
+        ? {
+            input: realtimeInputs,
+            instructions:
+              "Use the attached screenshot image to answer Greg's mobile voice request directly.",
+          }
+        : {}),
+    },
+  };
+  const event = responseCoordinator.requestCreate(createEvent);
+  if (event) {
+    session.sendEvent(event);
+  }
+}
+
 async function createMobileLiveVoiceStreamSession(
   credentials,
   audio,
@@ -2178,7 +2502,10 @@ function createMobileRealtimeSession(clientSecret, listeners = {}) {
     },
   );
   const pendingResponses = [];
+  const activeResponses = new Map();
+  const responseOrder = [];
   const pendingInputTranscripts = [];
+  let pendingInputTurnId = null;
   let pendingSessionUpdate = null;
   let connected = false;
   let closed = false;
@@ -2201,23 +2528,24 @@ function createMobileRealtimeSession(clientSecret, listeners = {}) {
   });
 
   function handleMobileRealtimeEvent(event) {
+    if (event?.type !== "session.updated") {
+      listeners.onRealtimeEvent?.(event);
+    }
     if (event?.type === "session.updated" && pendingSessionUpdate) {
       pendingSessionUpdate.resolve(event.session);
       pendingSessionUpdate = null;
       return;
     }
-    const responseId = event?.response_id ?? event?.response?.id;
+    const responseId = event?.response_id ?? event?.response?.id ?? event?.response?.object?.id;
     if (event?.type === "response.created" && responseId) {
-      const pending = getPendingMobileRealtimeResponse();
-      if (pending) {
-        pending.responseId = responseId;
-      }
-      listeners.onResponseCreated?.({ responseId });
+      const response = createMobileRealtimeResponseAccumulator(responseId);
+      listeners.onResponseCreated?.({ responseId, turnId: response.turnId });
       return;
     }
     if (event?.type === "response.output_audio.delta" && typeof event.delta === "string") {
-      getPendingMobileRealtimeResponse(responseId)?.audioChunks.push(event.delta);
-      listeners.onAudioDelta?.({ responseId, delta: event.delta });
+      const response = getMobileRealtimeResponseAccumulator(responseId);
+      response?.audioChunks.push(event.delta);
+      listeners.onAudioDelta?.({ responseId, turnId: response?.turnId, delta: event.delta });
       return;
     }
     if (
@@ -2225,44 +2553,60 @@ function createMobileRealtimeSession(clientSecret, listeners = {}) {
         event?.type === "response.output_text.delta") &&
       typeof event.delta === "string"
     ) {
-      getPendingMobileRealtimeResponse(responseId)?.transcriptChunks.push(event.delta);
-      listeners.onTextDelta?.({ responseId, delta: event.delta });
+      const response = getMobileRealtimeResponseAccumulator(responseId);
+      response?.transcriptChunks.push(event.delta);
+      listeners.onTextDelta?.({ responseId, turnId: response?.turnId, delta: event.delta });
       return;
     }
     if (event?.type === "response.output_item.done" && event.item?.type === "function_call") {
-      listeners.onToolCall?.({ call: event.item });
+      const response = getMobileRealtimeResponseAccumulator(responseId);
+      listeners.onToolCall?.({ call: event.item, responseId, turnId: response?.turnId });
       return;
     }
     if (event?.type === "conversation.item.input_audio_transcription.completed") {
       const transcript = typeof event.transcript === "string" ? event.transcript.trim() : "";
       if (transcript) {
-        const pending = getPendingMobileRealtimeResponse();
-        if (pending) {
+        const response = getMobileRealtimeResponseAccumulator(responseId, { create: false });
+        const pending = response ? null : getPendingMobileRealtimeResponse(responseId);
+        if (response) {
+          response.inputTranscripts.push(transcript);
+        } else if (pending) {
           pending.inputTranscripts.push(transcript);
         } else {
+          pendingInputTurnId = event.item_id ?? randomUUID();
           pendingInputTranscripts.push(transcript);
         }
-        listeners.onInputTranscript?.({ transcript });
+        listeners.onInputTranscript?.({
+          transcript,
+          responseId,
+          turnId: response?.turnId ?? pendingInputTurnId,
+        });
       }
       return;
     }
     if (event?.type === "response.done") {
-      const pending = pendingResponses.shift();
-      const responseResult = pending
+      const response =
+        takeMobileRealtimeResponseAccumulator(responseId) ??
+        takePendingMobileRealtimeResponse(responseId);
+      const responseResult = response
         ? {
             response: event.response,
-            audioChunks: pending.audioChunks,
-            transcriptChunks: pending.transcriptChunks,
-            inputTranscripts: pending.inputTranscripts,
+            responseId: response.responseId,
+            turnId: response.turnId,
+            audioChunks: response.audioChunks,
+            transcriptChunks: response.transcriptChunks,
+            inputTranscripts: response.inputTranscripts,
           }
         : {
             response: event.response,
+            responseId,
+            turnId: responseId,
             audioChunks: [],
             transcriptChunks: [],
             inputTranscripts: [],
           };
       listeners.onDone?.(responseResult);
-      pending?.resolve(responseResult);
+      response?.resolve?.(responseResult);
       return;
     }
     if (event?.type === "error") {
@@ -2275,16 +2619,86 @@ function createMobileRealtimeSession(clientSecret, listeners = {}) {
     }
   }
 
+  function createMobileRealtimeResponseAccumulator(responseId) {
+    const existing = activeResponses.get(responseId);
+    if (existing) {
+      return existing;
+    }
+    const pending =
+      getPendingMobileRealtimeResponse(responseId) ??
+      pendingResponses.find((item) => !item.responseId) ??
+      null;
+    if (pending) {
+      pending.responseId = responseId;
+    }
+    const response = {
+      responseId,
+      turnId: pendingInputTurnId ?? responseId,
+      audioChunks: pending?.audioChunks ?? [],
+      transcriptChunks: pending?.transcriptChunks ?? [],
+      inputTranscripts: pending?.inputTranscripts ?? pendingInputTranscripts.splice(0),
+      resolve: pending?.resolve,
+      reject: pending?.reject,
+    };
+    if (pendingInputTurnId === response.turnId) {
+      pendingInputTurnId = null;
+    }
+    activeResponses.set(responseId, response);
+    responseOrder.push(response);
+    return response;
+  }
+
+  function getMobileRealtimeResponseAccumulator(responseId, { create = true } = {}) {
+    if (responseId) {
+      return (
+        activeResponses.get(responseId) ??
+        (create ? createMobileRealtimeResponseAccumulator(responseId) : null)
+      );
+    }
+    return responseOrder.at(-1) ?? null;
+  }
+
   function getPendingMobileRealtimeResponse(responseId) {
     if (pendingResponses.length === 0) {
       return null;
     }
-    if (!responseId) {
-      return pendingResponses[pendingResponses.length - 1];
+    if (responseId) {
+      return pendingResponses.find((pending) => pending.responseId === responseId) ?? null;
     }
-    return (
-      pendingResponses.find((pending) => pending.responseId === responseId) ?? pendingResponses[0]
+    return pendingResponses.find((pending) => !pending.responseId) ?? pendingResponses.at(-1);
+  }
+
+  function takePendingMobileRealtimeResponse(responseId) {
+    const pending = getPendingMobileRealtimeResponse(responseId);
+    if (!pending) {
+      return null;
+    }
+    const pendingIndex = pendingResponses.indexOf(pending);
+    if (pendingIndex >= 0) {
+      pendingResponses.splice(pendingIndex, 1);
+    }
+    return pending;
+  }
+
+  function takeMobileRealtimeResponseAccumulator(responseId) {
+    const response = responseId ? activeResponses.get(responseId) : responseOrder[0];
+    if (!response) {
+      return null;
+    }
+    if (response.responseId) {
+      activeResponses.delete(response.responseId);
+    }
+    const orderIndex = responseOrder.indexOf(response);
+    if (orderIndex >= 0) {
+      responseOrder.splice(orderIndex, 1);
+    }
+    const pendingIndex = pendingResponses.findIndex(
+      (pending) => pending.responseId === response.responseId,
     );
+    if (pendingIndex >= 0) {
+      pendingResponses.splice(pendingIndex, 1);
+    }
+    return response;
   }
 
   function rejectPendingMobileRealtime(error) {
@@ -2499,7 +2913,7 @@ function buildMobileVoiceInstructions(settings = defaultSettings) {
     memoryContext: buildMemoryContextFromSettings(settings),
     profile: loadAgentProfile(),
     voiceStyle:
-      "You are being used from Greg's Android phone in push-to-talk voice mode. Reply with concise spoken audio. Use the same desktop tools, memory, planner, web, screen, and computer access when useful. Do not call end_call; the phone controls each turn.",
+      "You are being used from Greg's Android phone in realtime conversation voice mode. Reply with concise spoken audio after Greg pauses. Use the same desktop tools, memory, planner, web, screen, and computer access when useful. Do not call end_call; the phone controls when the conversation stops.",
   });
 }
 
@@ -2541,6 +2955,15 @@ function getRealtimeFunctionCalls(response) {
   return (Array.isArray(response?.output) ? response.output : []).filter(
     (item) => item?.type === "function_call" && item.status !== "incomplete",
   );
+}
+
+function isRealtimeResponseCancelled(response) {
+  const status = typeof response?.status === "string" ? response.status.toLowerCase() : "";
+  const reason =
+    typeof response?.status_details?.reason === "string"
+      ? response.status_details.reason.toLowerCase()
+      : "";
+  return status === "cancelled" || reason === "client_cancelled";
 }
 
 function extractRealtimeResponseText(response) {

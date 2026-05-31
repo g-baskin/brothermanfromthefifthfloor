@@ -20,6 +20,10 @@ const responseTypes = Object.freeze({
   "voice.stream.audio": "voice.stream.audio.ack",
   "voice.stream.end": "voice.reply",
   "voice.stream.cancel": "voice.stream.cancelled",
+  "voice.conversation.start": "voice.conversation.started",
+  "voice.conversation.audio": "voice.conversation.audio.ack",
+  "voice.conversation.stop": "voice.conversation.stopped",
+  "voice.conversation.cancel_response": "voice.conversation.response_cancelled",
 });
 
 export function createMobileBridgeServer(options = {}) {
@@ -281,6 +285,52 @@ export function createMobileBridgeServer(options = {}) {
           await callHandler(
             "cancelVoiceStream",
             message.turnId,
+            createClientContext(socket, state),
+          ),
+        );
+      case "voice.conversation.start":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler(
+            "startVoiceConversation",
+            message.conversationId,
+            message.audio,
+            message.history,
+            {
+              ...createClientContext(socket, state),
+              requestId: message.requestId,
+            },
+          ),
+        );
+      case "voice.conversation.audio":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler(
+            "appendVoiceConversationAudio",
+            message.conversationId,
+            message.chunk,
+            message.sequence,
+            createClientContext(socket, state),
+          ),
+        );
+      case "voice.conversation.stop":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler("stopVoiceConversation", message.conversationId, {
+            ...createClientContext(socket, state),
+            requestId: message.requestId,
+          }),
+        );
+      case "voice.conversation.cancel_response":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler(
+            "cancelVoiceConversationResponse",
+            message.conversationId,
             createClientContext(socket, state),
           ),
         );

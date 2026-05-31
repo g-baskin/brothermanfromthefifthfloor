@@ -27,13 +27,10 @@ const CLIENT_ID_KEY = "brah.mobile.clientId.v1";
 const DEFAULT_PORT = "19455";
 const REQUEST_TIMEOUT_MS = 8000;
 const ASSISTANT_TIMEOUT_MS = 180000;
-const VOICE_TIMEOUT_MS = 180000;
 const VOICE_SAMPLE_RATE = 24000;
 const VOICE_OUTPUT_SAMPLE_RATE = 24000;
 const VOICE_CHANNELS = 1;
-const MIN_VOICE_DURATION_MS = 350;
-const VOICE_CANCELLED_MESSAGE = "Voice turn cancelled.";
-const APP_BUILD_LABEL = "mobile-live-voice-stream-v3-sdk56";
+const APP_BUILD_LABEL = "mobile-realtime-conversation-v4-sdk56";
 const APP_RUNTIME_LABEL = Constants.appOwnership === "expo" ? "Expo Go" : "dev client";
 let nativeVoiceModule = null;
 
@@ -64,6 +61,7 @@ export default function App() {
   const chatMessagesRef = useRef([]);
   const voiceStartedAtRef = useRef(0);
   const activeVoiceTurnRef = useRef(null);
+  const handleVoiceStreamEventRef = useRef(null);
   const voicePlayerRef = useRef(null);
   const voicePipelineConnectedRef = useRef(false);
   const voicePipelineTurnRef = useRef(null);
@@ -71,6 +69,7 @@ export default function App() {
   const [recordingVoice, setRecordingVoice] = useState(false);
   const [streamingVoice, setStreamingVoice] = useState(false);
   const [voiceReady, setVoiceReady] = useState(false);
+  const [conversationActive, setConversationActive] = useState(false);
   const [voiceSummary, setVoiceSummary] = useState("");
   const [scanning, setScanning] = useState(false);
   const [pendingAutoPair, setPendingAutoPair] = useState(false);
@@ -181,7 +180,9 @@ export default function App() {
         setAuthenticated(false);
       };
       socket.onmessage = (event) => {
-        handleSocketMessage(pendingRef.current, event.data);
+        handleSocketMessage(pendingRef.current, event.data, (message) => {
+          handleVoiceStreamEventRef.current?.(message);
+        });
       };
     });
   }, [bridgeUrl, closeSocket]);
@@ -426,8 +427,8 @@ export default function App() {
   }, [authenticate, authenticated, sendBridgeRequest, toolArgs, toolName]);
 
   const reloadBridgeState = useCallback(async () => {
-    if (recordingVoice || streamingVoice) {
-      setStatusText("Finish or cancel the active voice turn before reloading.");
+    if (conversationActive || recordingVoice || streamingVoice) {
+      setStatusText("End the active voice conversation before reloading.");
       return;
     }
     setBusy(true);
@@ -462,42 +463,82 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [authenticate, connect, recordingVoice, sendBridgeRequest, storedDevice, streamingVoice]);
+  }, [
+    authenticate,
+    connect,
+    conversationActive,
+    recordingVoice,
+    sendBridgeRequest,
+    storedDevice,
+    streamingVoice,
+  ]);
 
   const handleVoiceStreamEvent = useCallback((message) => {
     const payload = message?.payload ?? {};
+    const activeTurn = activeVoiceTurnRef.current;
+    const payloadConversationId =
+      typeof payload.conversationId === "string" ? payload.conversationId : null;
+    if (payloadConversationId && activeTurn?.conversationId !== payloadConversationId) {
+      return;
+    }
     const turnId =
-      typeof payload.turnId === "string" ? payload.turnId : activeVoiceTurnRef.current?.turnId;
+      typeof payload.turnId === "string"
+        ? payload.turnId
+        : activeTurn?.currentTurnId || activeTurn?.turnId || activeTurn?.conversationId;
     if (!turnId) {
       return;
     }
-    const activeTurn = activeVoiceTurnRef.current ?? { turnId };
-    if (!activeTurn.userMessageId) {
-      activeTurn.userMessageId = createRequestId();
+    const voiceSession = activeTurn ?? { turnId };
+    activeVoiceTurnRef.current = voiceSession;
+
+    if (message.type === "voice.input.speech_started") {
+      const interruptedTurnId = voiceSession.currentTurnId ?? voiceSession.activeTurnId ?? turnId;
+      invalidateVoicePipelineTurn(interruptedTurnId).catch(() => {});
+      voicePipelineFirstChunkRef.current = true;
+      setStreamingVoice(false);
+      setVoiceSummary("Listening — go ahead.");
+      setStatusText("Listening — go ahead.");
+      return;
     }
-    if (!activeTurn.assistantMessageId) {
-      activeTurn.assistantMessageId = createRequestId();
+
+    if (message.type === "voice.input.speech_stopped") {
+      setStatusText("Heard you. Brah replies when the pause is long enough…");
+      return;
     }
-    activeTurn.turnId = turnId;
-    activeVoiceTurnRef.current = activeTurn;
-    setStreamingVoice(true);
+
+    if (message.type === "voice.reply.started") {
+      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
+      setStreamingVoice(true);
+      setVoiceReady(false);
+      setStatusText("Brah is answering…");
+      return;
+    }
 
     if (message.type === "voice.reply.transcript") {
+      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
       const transcript = cleanText(payload.transcript);
       if (transcript) {
-        upsertChatMessageById(setChatMessages, activeTurn.userMessageId, "user", transcript);
+        upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
         setVoiceSummary(`You: ${transcript}\nBrah: …`);
-        setStatusText("Desktop transcribed your voice. Streaming Brah’s response…");
+        setStatusText("Desktop transcribed your voice. Brah is answering…");
       }
       return;
     }
 
     if (message.type === "voice.reply.delta") {
+      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
       const delta = typeof payload.delta === "string" ? payload.delta : "";
       if (delta) {
-        upsertChatMessageById(setChatMessages, activeTurn.assistantMessageId, "assistant", delta, {
-          append: true,
-        });
+        upsertChatMessageById(
+          setChatMessages,
+          voiceSession.assistantMessageId,
+          "assistant",
+          delta,
+          {
+            append: true,
+          },
+        );
+        setStreamingVoice(true);
         setVoiceSummary("Brah is streaming a reply…");
         setStatusText("Streaming Brah’s response from desktop…");
       }
@@ -505,8 +546,9 @@ export default function App() {
     }
 
     if (message.type === "voice.reply.audio_delta") {
+      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
       const audioChunk = payload.audio?.base64;
-      activeTurn.audioChunks = [...(activeTurn.audioChunks ?? []), audioChunk].filter(Boolean);
+      voiceSession.audioChunks = [...(voiceSession.audioChunks ?? []), audioChunk].filter(Boolean);
       if (audioChunk) {
         const playedStreamingAudio = pushVoicePipelineAudio(
           audioChunk,
@@ -515,13 +557,16 @@ export default function App() {
           voicePipelineTurnRef,
           voicePipelineFirstChunkRef,
         );
-        activeTurn.playedStreamingAudio = activeTurn.playedStreamingAudio || playedStreamingAudio;
+        voiceSession.playedStreamingAudio =
+          voiceSession.playedStreamingAudio || playedStreamingAudio;
       }
+      setStreamingVoice(true);
       setStatusText("Playing streaming audio from desktop Brah…");
       return;
     }
 
     if (message.type === "voice.reply.tool") {
+      startConversationTurn(voiceSession, turnId, voicePipelineFirstChunkRef);
       const name = cleanText(payload.name) || "desktop tool";
       const action = payload.status === "end" ? "Finished" : "Using";
       setVoiceSummary(`${action} ${name}…`);
@@ -529,14 +574,56 @@ export default function App() {
       return;
     }
 
+    if (message.type === "voice.reply.cancelled") {
+      invalidateVoicePipelineTurn(turnId).catch(() => {});
+      finishConversationTurn(voiceSession, turnId);
+      setStreamingVoice(false);
+      setStatusText("Response cancelled; still listening.");
+      return;
+    }
+
+    if (message.type === "voice.reply.error") {
+      const errorMessage = cleanText(payload.message) || "Voice response failed.";
+      setStreamingVoice(false);
+      setVoiceSummary(`Voice error: ${errorMessage}`);
+      setStatusText(errorMessage);
+      return;
+    }
+
     if (message.type === "voice.reply.done") {
+      const reply = cleanText(payload.reply);
+      const transcript = cleanText(payload.transcript);
+      if (transcript && voiceSession.userMessageId) {
+        upsertChatMessageById(setChatMessages, voiceSession.userMessageId, "user", transcript);
+      }
+      if (reply && voiceSession.assistantMessageId) {
+        upsertChatMessageById(setChatMessages, voiceSession.assistantMessageId, "assistant", reply);
+      }
       markVoicePipelineTurnComplete(turnId, voicePipelineFirstChunkRef);
-      setStatusText("Desktop finished streaming Brah’s response.");
+      finishConversationTurn(voiceSession, turnId);
+      if (payload.audio?.base64) {
+        void playAssistantAudio(payload.audio, voicePlayerRef, {
+          autoplay: !voiceSession.playedStreamingAudio,
+        });
+        setVoiceReady(true);
+      } else {
+        setVoiceReady(false);
+      }
+      setStreamingVoice(false);
+      setVoiceSummary(reply ? `Brah: ${reply}` : "Listening — speak naturally.");
+      setStatusText("Brah finished. Still listening.");
     }
   }, []);
 
-  const startVoiceTurn = useCallback(async () => {
-    if (busy || recordingVoice || streamingVoice) {
+  useEffect(() => {
+    handleVoiceStreamEventRef.current = handleVoiceStreamEvent;
+    return () => {
+      handleVoiceStreamEventRef.current = null;
+    };
+  }, [handleVoiceStreamEvent]);
+
+  const startVoiceConversation = useCallback(async () => {
+    if (busy || conversationActive) {
       return;
     }
     setBusy(true);
@@ -548,6 +635,7 @@ export default function App() {
       }
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
+        setBusy(false);
         Alert.alert("Microphone needed", "Allow microphone access to talk to desktop Brah.");
         return;
       }
@@ -559,31 +647,32 @@ export default function App() {
       voicePlayerRef.current?.remove?.();
       voicePlayerRef.current = null;
       await connectVoicePipeline(voicePipelineConnectedRef);
-      const turnId = createRequestId();
+      const conversationId = createRequestId();
       const startRequestId = createRequestId();
       activeVoiceTurnRef.current = {
-        turnId,
+        conversationId,
         startRequestId,
-        endRequestId: null,
-        userMessageId: createRequestId(),
-        assistantMessageId: createRequestId(),
+        activeTurnId: null,
+        currentTurnId: null,
+        userMessageId: null,
+        assistantMessageId: null,
         audioSequence: 0,
         chunkSendChain: Promise.resolve(),
         audioChunks: [],
         cancelled: false,
         micSubscription: null,
       };
-      voicePipelineTurnRef.current = turnId;
+      voicePipelineTurnRef.current = null;
       voicePipelineFirstChunkRef.current = true;
-      await invalidateVoicePipelineTurn(turnId);
+      await invalidateVoicePipelineTurn(conversationId);
       const history = chatMessagesRef.current
         .map((item) => ({ role: item.role, text: item.text }))
         .slice(-12);
       const response = await sendBridgeRequest(
         {
-          type: "voice.stream.start",
+          type: "voice.conversation.start",
           requestId: startRequestId,
-          turnId,
+          conversationId,
           audio: {
             sampleRate: VOICE_SAMPLE_RATE,
             channels: VOICE_CHANNELS,
@@ -591,30 +680,39 @@ export default function App() {
           },
           history,
         },
-        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.started" },
+        {
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          finalType: "voice.conversation.started",
+          onEvent: handleVoiceStreamEvent,
+        },
       );
       ensureOk(response);
       await startNativeMicrophoneStream(activeVoiceTurnRef.current, voiceInputStream);
       voiceStartedAtRef.current = Date.now();
       setBusy(false);
       setRecordingVoice(true);
+      setConversationActive(true);
       setStreamingVoice(false);
       setVoiceReady(false);
-      setVoiceSummary("Listening live… tap again when you’re done speaking, then Brah replies.");
-      setStatusText("Streaming your mic to desktop. Tap again to finish and get Brah’s reply…");
+      setVoiceSummary("Listening — speak naturally. Brah replies when you pause.");
+      setStatusText("Listening — speak naturally. Brah replies when you pause.");
     } catch (error) {
       await stopNativeMicrophoneStream(activeVoiceTurnRef.current);
-      if (activeVoiceTurnRef.current?.turnId) {
+      if (activeVoiceTurnRef.current?.conversationId) {
         try {
           await sendBridgeRequest(
-            { type: "voice.stream.cancel", turnId: activeVoiceTurnRef.current.turnId },
-            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
+            {
+              type: "voice.conversation.stop",
+              conversationId: activeVoiceTurnRef.current.conversationId,
+            },
+            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.conversation.stopped" },
           );
         } catch {}
       }
       activeVoiceTurnRef.current = null;
       setBusy(false);
       setRecordingVoice(false);
+      setConversationActive(false);
       setStreamingVoice(false);
       setVoiceSummary(`Voice start failed: ${error.message}`);
       setStatusText(error.message);
@@ -624,92 +722,40 @@ export default function App() {
     authenticate,
     authenticated,
     busy,
-    recordingVoice,
+    conversationActive,
+    handleVoiceStreamEvent,
     sendBridgeRequest,
-    streamingVoice,
     voiceInputStream,
   ]);
 
-  const stopVoiceTurn = useCallback(async () => {
-    if (!recordingVoice) {
+  const stopVoiceConversation = useCallback(async () => {
+    if (!conversationActive && !recordingVoice) {
       return;
     }
     const activeTurn = activeVoiceTurnRef.current;
     await stopNativeMicrophoneStream(activeTurn);
     setRecordingVoice(false);
-
-    const durationMs = Date.now() - voiceStartedAtRef.current;
-    if (durationMs < MIN_VOICE_DURATION_MS) {
-      setVoiceSummary("Record a little longer before sending.");
-      setStatusText("Voice turn was too short.");
-      if (activeTurn?.turnId) {
-        try {
-          await sendBridgeRequest(
-            { type: "voice.stream.cancel", turnId: activeTurn.turnId },
-            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
-          );
-        } catch {}
-      }
-      activeVoiceTurnRef.current = null;
-      return;
-    }
-
+    setConversationActive(false);
     setBusy(true);
-    setStreamingVoice(true);
-    setVoiceReady(false);
-    setVoiceSummary("Finalizing live voice with desktop Brah…");
-    setStatusText("Desktop is finishing your live voice turn…");
+    setVoiceSummary("Stopping realtime conversation…");
+    setStatusText("Stopping realtime conversation…");
     try {
-      if (!activeTurn?.turnId) {
-        throw new Error("No active voice turn to finish.");
+      if (!activeTurn?.conversationId) {
+        throw new Error("No active voice conversation to stop.");
       }
       await activeTurn.chunkSendChain;
-      const endRequestId = createRequestId();
-      activeTurn.endRequestId = endRequestId;
       const response = await sendBridgeRequest(
         {
-          type: "voice.stream.end",
-          requestId: endRequestId,
-          turnId: activeTurn.turnId,
+          type: "voice.conversation.stop",
+          conversationId: activeTurn.conversationId,
         },
-        {
-          timeoutMs: VOICE_TIMEOUT_MS,
-          finalType: "voice.reply",
-          onEvent: handleVoiceStreamEvent,
-        },
+        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.conversation.stopped" },
       );
-      if (activeVoiceTurnRef.current?.cancelled) {
-        return;
-      }
       ensureOk(response);
-      const transcript = cleanText(response.payload?.transcript);
-      const reply = cleanText(response.payload?.reply) || "Done.";
-      const audio = response.payload?.audio;
-      if (transcript) {
-        upsertChatMessageById(setChatMessages, activeTurn.userMessageId, "user", transcript);
-      }
-      upsertChatMessageById(setChatMessages, activeTurn.assistantMessageId, "assistant", reply);
-      if (audio?.base64) {
-        await playAssistantAudio(audio, voicePlayerRef, {
-          autoplay: !activeTurn.playedStreamingAudio,
-        });
-        setVoiceReady(true);
-      } else {
-        markVoicePipelineTurnComplete(activeTurn.turnId, voicePipelineFirstChunkRef);
-      }
-      setVoiceSummary(transcript ? `You: ${transcript}\nBrah: ${reply}` : `Brah: ${reply}`);
-      setStatusText("Brah replied by voice from desktop.");
+      setVoiceSummary("Conversation stopped.");
+      setStatusText("Conversation stopped.");
     } catch (error) {
-      if (error.message === VOICE_CANCELLED_MESSAGE) {
-        setVoiceSummary(VOICE_CANCELLED_MESSAGE);
-        setStatusText("Cancelled mobile voice turn.");
-        return;
-      }
-      setVoiceSummary(`Voice error: ${error.message}`);
-      setChatMessages((messages) => [
-        ...messages,
-        { id: createRequestId(), role: "assistant", text: `Voice error: ${error.message}` },
-      ]);
+      setVoiceSummary(`Stop failed: ${error.message}`);
       setStatusText(error.message);
       Alert.alert("Voice failed", error.message);
     } finally {
@@ -717,52 +763,35 @@ export default function App() {
       setStreamingVoice(false);
       activeVoiceTurnRef.current = null;
     }
-  }, [handleVoiceStreamEvent, recordingVoice, sendBridgeRequest]);
+  }, [conversationActive, recordingVoice, sendBridgeRequest]);
 
-  const cancelVoiceTurn = useCallback(async () => {
+  const cancelConversationResponse = useCallback(async () => {
     const activeTurn = activeVoiceTurnRef.current;
-    if (activeTurn) {
-      activeTurn.cancelled = true;
-      for (const requestId of [
-        activeTurn.startRequestId,
-        activeTurn.endRequestId,
-        activeTurn.requestId,
-      ]) {
-        if (!requestId) continue;
-        const pending = pendingRef.current.get(requestId);
-        if (pending) {
-          clearTimeout(pending.timeoutId);
-          pendingRef.current.delete(requestId);
-          pending.reject(new Error(VOICE_CANCELLED_MESSAGE));
-        }
-      }
+    if (!activeTurn?.conversationId) {
+      return;
     }
-    await stopNativeMicrophoneStream(activeTurn);
-    if (activeTurn?.turnId) {
-      await invalidateVoicePipelineTurn(createRequestId());
-    }
-    setRecordingVoice(false);
+    const turnId = activeTurn.currentTurnId ?? activeTurn.activeTurnId ?? createRequestId();
+    await invalidateVoicePipelineTurn(turnId);
     setStreamingVoice(false);
-    setBusy(false);
-    setVoiceSummary(VOICE_CANCELLED_MESSAGE);
-    setStatusText("Cancelled mobile voice turn.");
-    if (activeTurn?.turnId) {
-      try {
-        const response = await sendBridgeRequest(
-          { type: "voice.stream.cancel", turnId: activeTurn.turnId },
-          { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
-        );
-        ensureOk(response);
-      } catch (error) {
-        setStatusText(`Cancel failed: ${error.message}`);
-      }
+    setVoiceSummary("Response cancelled; still listening.");
+    setStatusText("Response cancelled; still listening.");
+    try {
+      const response = await sendBridgeRequest(
+        {
+          type: "voice.conversation.cancel_response",
+          conversationId: activeTurn.conversationId,
+        },
+        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.conversation.response_cancelled" },
+      );
+      ensureOk(response);
+    } catch (error) {
+      setStatusText(`Cancel failed: ${error.message}`);
     }
-    activeVoiceTurnRef.current = null;
   }, [sendBridgeRequest]);
 
   const replayAssistantAudio = useCallback(async () => {
     const player = voicePlayerRef.current;
-    if (!player) {
+    if (!player || conversationActive) {
       return;
     }
     try {
@@ -776,7 +805,7 @@ export default function App() {
     } catch (error) {
       setVoiceSummary(`Replay failed: ${error.message}`);
     }
-  }, []);
+  }, [conversationActive]);
 
   const sendAssistantMessage = useCallback(async () => {
     const message = chatInput.trim();
@@ -882,7 +911,9 @@ export default function App() {
             <Button
               label="Reload"
               onPress={reloadBridgeState}
-              disabled={busy || !bridgeUrl || recordingVoice || streamingVoice}
+              disabled={
+                busy || !bridgeUrl || conversationActive || recordingVoice || streamingVoice
+              }
               secondary
             />
             <Button label="Disconnect" onPress={closeSocket} disabled={!connected} secondary />
@@ -967,47 +998,42 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Voice push-to-talk</Text>
+          <Text style={styles.cardTitle}>Realtime conversation</Text>
           <Text style={styles.hint}>
-            Tap to start streaming your mic, then tap again when you’re done speaking. Brah starts
-            replying after the push-to-talk turn is finished, while tools stay on Brah desktop.
+            Start one continuous mic session, speak naturally, and Brah replies when you pause. Tap
+            End conversation when you’re done.
           </Text>
           <Pressable
-            onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
-            disabled={(busy && !recordingVoice) || streamingVoice || !storedDevice}
+            onPress={conversationActive ? stopVoiceConversation : startVoiceConversation}
+            disabled={(busy && !conversationActive) || !storedDevice}
             style={({ pressed }) => [
               styles.voiceButton,
-              recordingVoice && styles.voiceButtonRecording,
-              ((busy && !recordingVoice) || streamingVoice || !storedDevice) &&
-                styles.buttonDisabled,
-              pressed &&
-                !(busy && !recordingVoice) &&
-                !streamingVoice &&
-                storedDevice &&
-                styles.buttonPressed,
+              conversationActive && styles.voiceButtonRecording,
+              ((busy && !conversationActive) || !storedDevice) && styles.buttonDisabled,
+              pressed && !(busy && !conversationActive) && storedDevice && styles.buttonPressed,
             ]}
           >
             <Text style={styles.voiceButtonText}>
-              {recordingVoice ? "Listening… tap when done" : "Start push-to-talk"}
+              {conversationActive ? "Listening… tap to end" : "Start conversation"}
             </Text>
           </Pressable>
           <View style={styles.row}>
             <Button
-              label={recordingVoice ? "Finish and get reply" : "Start mic"}
-              onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
-              disabled={(busy && !recordingVoice) || streamingVoice || !storedDevice}
-              secondary={!recordingVoice}
+              label={conversationActive ? "End conversation" : "Start conversation"}
+              onPress={conversationActive ? stopVoiceConversation : startVoiceConversation}
+              disabled={(busy && !conversationActive) || !storedDevice}
+              secondary={!conversationActive}
             />
             <Button
-              label="Cancel reply"
-              onPress={cancelVoiceTurn}
-              disabled={!streamingVoice}
+              label="Cancel response"
+              onPress={cancelConversationResponse}
+              disabled={!conversationActive || !streamingVoice}
               secondary
             />
             <Button
               label="Replay reply"
               onPress={replayAssistantAudio}
-              disabled={!voiceReady}
+              disabled={!voiceReady || conversationActive}
               secondary
             />
           </View>
@@ -1095,7 +1121,7 @@ function createClientId() {
   return `android-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function handleSocketMessage(pendingRequests, data) {
+function handleSocketMessage(pendingRequests, data, onEvent) {
   let parsed;
   try {
     parsed = JSON.parse(String(data));
@@ -1103,7 +1129,10 @@ function handleSocketMessage(pendingRequests, data) {
     return;
   }
   const pending = pendingRequests.get(parsed.requestId);
-  if (!pending) return;
+  if (!pending) {
+    onEvent?.(parsed);
+    return;
+  }
   if (parsed.type === "error" || parsed.ok === false) {
     clearTimeout(pending.timeoutId);
     pendingRequests.delete(parsed.requestId);
@@ -1164,7 +1193,7 @@ function requireOptionalPipelineModule() {
 }
 
 function queueVoiceStreamBuffer(activeTurn, buffer, sendBridgeRequest, setStatusText) {
-  if (!activeTurn?.turnId || activeTurn.cancelled) {
+  if ((!activeTurn?.turnId && !activeTurn?.conversationId) || activeTurn.cancelled) {
     return;
   }
   const chunk = arrayBufferToBase64(buffer?.data);
@@ -1173,16 +1202,27 @@ function queueVoiceStreamBuffer(activeTurn, buffer, sendBridgeRequest, setStatus
   }
   const sequence = activeTurn.audioSequence ?? 0;
   activeTurn.audioSequence = sequence + 1;
+  const isConversation = Boolean(activeTurn.conversationId);
   activeTurn.chunkSendChain = (activeTurn.chunkSendChain ?? Promise.resolve())
     .then(() =>
       sendBridgeRequest(
+        isConversation
+          ? {
+              type: "voice.conversation.audio",
+              conversationId: activeTurn.conversationId,
+              chunk,
+              sequence,
+            }
+          : {
+              type: "voice.stream.audio",
+              turnId: activeTurn.turnId,
+              chunk,
+              sequence,
+            },
         {
-          type: "voice.stream.audio",
-          turnId: activeTurn.turnId,
-          chunk,
-          sequence,
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          finalType: isConversation ? "voice.conversation.audio.ack" : "voice.stream.audio.ack",
         },
-        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.audio.ack" },
       ),
     )
     .catch((error) => {
@@ -1191,8 +1231,8 @@ function queueVoiceStreamBuffer(activeTurn, buffer, sendBridgeRequest, setStatus
 }
 
 async function startNativeMicrophoneStream(activeTurn, voiceInputStream) {
-  if (!activeTurn?.turnId) {
-    throw new Error("No active voice turn to stream.");
+  if (!activeTurn?.turnId && !activeTurn?.conversationId) {
+    throw new Error("No active voice session to stream.");
   }
   if (!voiceInputStream?.start) {
     throw new Error(
@@ -1289,6 +1329,38 @@ function markVoicePipelineTurnComplete(turnId, firstChunkRef) {
     turnId,
     isLastChunk: true,
   });
+}
+
+function startConversationTurn(activeTurn, turnId, firstChunkRef) {
+  if (!activeTurn) {
+    return;
+  }
+  if (
+    activeTurn.currentTurnId === turnId &&
+    activeTurn.userMessageId &&
+    activeTurn.assistantMessageId
+  ) {
+    return;
+  }
+  activeTurn.currentTurnId = turnId;
+  activeTurn.activeTurnId = turnId;
+  activeTurn.turnId = turnId;
+  activeTurn.userMessageId = createRequestId();
+  activeTurn.assistantMessageId = createRequestId();
+  activeTurn.audioChunks = [];
+  activeTurn.playedStreamingAudio = false;
+  if (firstChunkRef) {
+    firstChunkRef.current = true;
+  }
+}
+
+function finishConversationTurn(activeTurn, turnId) {
+  if (!activeTurn) {
+    return;
+  }
+  if (!turnId || activeTurn.currentTurnId === turnId) {
+    activeTurn.currentTurnId = null;
+  }
 }
 
 function upsertChatMessageById(setChatMessages, id, role, text, { append = false } = {}) {

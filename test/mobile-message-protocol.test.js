@@ -5,6 +5,10 @@ import {
   createBridgeResponse,
   isBridgeRequestMessage,
   normalizeBridgeMessage,
+  normalizeVoiceConversationAudioMessage,
+  normalizeVoiceConversationCancelResponseMessage,
+  normalizeVoiceConversationStartMessage,
+  normalizeVoiceConversationStopMessage,
   normalizeVoiceStreamAudioMessage,
   normalizeVoiceStreamCancelMessage,
   normalizeVoiceStreamEndMessage,
@@ -223,6 +227,97 @@ test("accepts live voice stream messages", () => {
   });
 });
 
+test("accepts realtime voice conversation messages", () => {
+  assert.deepEqual(
+    normalizeBridgeMessage({
+      type: "voice.conversation.start",
+      requestId: "conversation-start-1",
+      conversationId: " conversation-1 ",
+      audio: { sampleRate: 24000, channels: 1, encoding: "PCM16" },
+      history: [{ role: "user", text: "hello" }],
+    }),
+    {
+      type: "voice.conversation.start",
+      requestId: "conversation-start-1",
+      conversationId: "conversation-1",
+      audio: { sampleRate: 24000, channels: 1, encoding: "pcm16", mimeType: null },
+      history: [{ role: "user", text: "hello" }],
+    },
+  );
+
+  assert.deepEqual(
+    normalizeBridgeMessage({
+      type: "voice.conversation.audio",
+      requestId: "conversation-audio-1",
+      conversationId: " conversation-1 ",
+      chunk: " AAA= ",
+      sequence: "2",
+    }),
+    {
+      type: "voice.conversation.audio",
+      requestId: "conversation-audio-1",
+      conversationId: "conversation-1",
+      chunk: "AAA=",
+      sequence: 2,
+    },
+  );
+
+  assert.deepEqual(
+    normalizeVoiceConversationStartMessage(
+      {
+        conversationId: "conversation-2",
+        audio: { sampleRate: 16000, channels: 1, encoding: "pcm16" },
+      },
+      "conversation-start-2",
+    ),
+    {
+      type: "voice.conversation.start",
+      requestId: "conversation-start-2",
+      conversationId: "conversation-2",
+      audio: { sampleRate: 16000, channels: 1, encoding: "pcm16", mimeType: null },
+      history: [],
+    },
+  );
+
+  assert.deepEqual(
+    normalizeVoiceConversationAudioMessage(
+      { conversationId: "conversation-2", chunk: "AQID", sequence: 3 },
+      "conversation-audio-2",
+    ),
+    {
+      type: "voice.conversation.audio",
+      requestId: "conversation-audio-2",
+      conversationId: "conversation-2",
+      chunk: "AQID",
+      sequence: 3,
+    },
+  );
+
+  assert.deepEqual(
+    normalizeVoiceConversationStopMessage(
+      { conversationId: "conversation-2" },
+      "conversation-stop-2",
+    ),
+    {
+      type: "voice.conversation.stop",
+      requestId: "conversation-stop-2",
+      conversationId: "conversation-2",
+    },
+  );
+
+  assert.deepEqual(
+    normalizeVoiceConversationCancelResponseMessage(
+      { conversationId: "conversation-2" },
+      "conversation-cancel-2",
+    ),
+    {
+      type: "voice.conversation.cancel_response",
+      requestId: "conversation-cancel-2",
+      conversationId: "conversation-2",
+    },
+  );
+});
+
 test("rejects non-object, unknown, and bad fields", () => {
   assert.throws(() => normalizeBridgeMessage(null), /object/);
   assert.throws(() => normalizeBridgeMessage({ type: "unknown" }), /Unsupported/);
@@ -318,6 +413,56 @@ test("rejects non-object, unknown, and bad fields", () => {
     () => normalizeBridgeMessage({ type: "voice.stream.cancel", turnId: "x".repeat(121) }),
     /turnId/,
   );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.conversation.start",
+        conversationId: "c-1",
+        audio: null,
+      }),
+    /audio/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.conversation.start",
+        conversationId: "c-1",
+        audio: { sampleRate: 24000, channels: 1, encoding: "aac_m4a" },
+      }),
+    /encoding/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.conversation.audio",
+        conversationId: "c-1",
+        chunk: "not base64?",
+        sequence: 1,
+      }),
+    /base64/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.conversation.audio",
+        conversationId: "c-1",
+        chunk: "AAAA",
+        sequence: -1,
+      }),
+    /sequence/,
+  );
+  assert.throws(
+    () => normalizeBridgeMessage({ type: "voice.conversation.stop", conversationId: "" }),
+    /conversationId/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.conversation.cancel_response",
+        conversationId: "x".repeat(121),
+      }),
+    /conversationId/,
+  );
 });
 
 test("creates stable response and error envelopes", () => {
@@ -344,6 +489,10 @@ test("identifies bridge request messages", () => {
   assert.equal(isBridgeRequestMessage({ type: "voice.stream.audio" }), true);
   assert.equal(isBridgeRequestMessage({ type: "voice.stream.end" }), true);
   assert.equal(isBridgeRequestMessage({ type: "voice.stream.cancel" }), true);
+  assert.equal(isBridgeRequestMessage({ type: "voice.conversation.start" }), true);
+  assert.equal(isBridgeRequestMessage({ type: "voice.conversation.audio" }), true);
+  assert.equal(isBridgeRequestMessage({ type: "voice.conversation.stop" }), true);
+  assert.equal(isBridgeRequestMessage({ type: "voice.conversation.cancel_response" }), true);
   assert.equal(isBridgeRequestMessage({ type: "error" }), false);
   assert.equal(isBridgeRequestMessage(null), false);
 });

@@ -13,10 +13,15 @@ const bridgeRequestTypes = new Set([
   "voice.stream.audio",
   "voice.stream.end",
   "voice.stream.cancel",
+  "voice.conversation.start",
+  "voice.conversation.audio",
+  "voice.conversation.stop",
+  "voice.conversation.cancel_response",
 ]);
 
 const MAX_REQUEST_ID_LENGTH = 120;
 const MAX_TURN_ID_LENGTH = 120;
+const MAX_CONVERSATION_ID_LENGTH = 120;
 const MAX_VOICE_CHUNKS = 800;
 const MAX_VOICE_BASE64_BYTES = 8 * 1024 * 1024;
 const MAX_VOICE_STREAM_CHUNK_BASE64_BYTES = 256 * 1024;
@@ -56,6 +61,14 @@ export function normalizeBridgeMessage(value) {
       return normalizeVoiceStreamEndMessage(value, requestId);
     case "voice.stream.cancel":
       return normalizeVoiceStreamCancelMessage(value, requestId);
+    case "voice.conversation.start":
+      return normalizeVoiceConversationStartMessage(value, requestId);
+    case "voice.conversation.audio":
+      return normalizeVoiceConversationAudioMessage(value, requestId);
+    case "voice.conversation.stop":
+      return normalizeVoiceConversationStopMessage(value, requestId);
+    case "voice.conversation.cancel_response":
+      return normalizeVoiceConversationCancelResponseMessage(value, requestId);
     default:
       return { type, requestId };
   }
@@ -235,6 +248,65 @@ export function normalizeVoiceStreamCancelMessage(value, requestId) {
   };
 }
 
+export function normalizeVoiceConversationStartMessage(value, requestId) {
+  if (!isPlainObject(value.audio)) {
+    throw new Error("voice.conversation.start.audio must be an object.");
+  }
+  return {
+    type: "voice.conversation.start",
+    requestId,
+    conversationId: normalizeConversationId(
+      value.conversationId,
+      "voice.conversation.start.conversationId",
+    ),
+    audio: {
+      sampleRate: normalizeVoiceSampleRate(value.audio.sampleRate),
+      channels: normalizeVoiceChannels(value.audio.channels),
+      encoding: normalizePcmVoiceEncoding(
+        value.audio.encoding,
+        "voice.conversation.start.audio.encoding",
+      ),
+      mimeType: normalizeOptionalString(value.audio.mimeType),
+    },
+    history: normalizeAssistantHistory(value.history),
+  };
+}
+
+export function normalizeVoiceConversationAudioMessage(value, requestId) {
+  return {
+    type: "voice.conversation.audio",
+    requestId,
+    conversationId: normalizeConversationId(
+      value.conversationId,
+      "voice.conversation.audio.conversationId",
+    ),
+    chunk: normalizeVoiceStreamChunk(value.chunk, "voice.conversation.audio.chunk"),
+    sequence: normalizeVoiceStreamSequence(value.sequence, "voice.conversation.audio.sequence"),
+  };
+}
+
+export function normalizeVoiceConversationStopMessage(value, requestId) {
+  return {
+    type: "voice.conversation.stop",
+    requestId,
+    conversationId: normalizeConversationId(
+      value.conversationId,
+      "voice.conversation.stop.conversationId",
+    ),
+  };
+}
+
+export function normalizeVoiceConversationCancelResponseMessage(value, requestId) {
+  return {
+    type: "voice.conversation.cancel_response",
+    requestId,
+    conversationId: normalizeConversationId(
+      value.conversationId,
+      "voice.conversation.cancel_response.conversationId",
+    ),
+  };
+}
+
 function normalizeVoiceAudioChunks(audio) {
   const rawChunks = Array.isArray(audio.chunks)
     ? audio.chunks
@@ -296,30 +368,37 @@ function normalizePcmVoiceEncoding(value, fieldName) {
   return encoding;
 }
 
-function normalizeVoiceStreamChunk(value) {
+function normalizeVoiceStreamChunk(value, fieldName = "voice.stream.audio.chunk") {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error("voice.stream.audio.chunk must be a non-empty base64 string.");
+    throw new Error(`${fieldName} must be a non-empty base64 string.`);
   }
   const trimmed = value.trim();
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(trimmed) || trimmed.length % 4 !== 0) {
-    throw new Error("voice.stream.audio.chunk must be base64 encoded.");
+    throw new Error(`${fieldName} must be base64 encoded.`);
   }
   if (trimmed.length > MAX_VOICE_STREAM_CHUNK_BASE64_BYTES) {
-    throw new Error("voice.stream.audio.chunk is too large.");
+    throw new Error(`${fieldName} is too large.`);
   }
   return trimmed;
 }
 
-function normalizeVoiceStreamSequence(value) {
+function normalizeVoiceStreamSequence(value, fieldName = "voice.stream.audio.sequence") {
   const sequence = Number(value);
   if (!Number.isInteger(sequence) || sequence < 0 || sequence > MAX_VOICE_STREAM_SEQUENCE) {
-    throw new Error("voice.stream.audio.sequence must be a reasonable non-negative integer.");
+    throw new Error(`${fieldName} must be a reasonable non-negative integer.`);
   }
   return sequence;
 }
 
 function normalizeTurnId(value, fieldName) {
   if (typeof value !== "string" || !value.trim() || value.length > MAX_TURN_ID_LENGTH) {
+    throw new Error(`${fieldName} must be a non-empty short string.`);
+  }
+  return value.trim();
+}
+
+function normalizeConversationId(value, fieldName) {
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_CONVERSATION_ID_LENGTH) {
     throw new Error(`${fieldName} must be a non-empty short string.`);
   }
   return value.trim();
