@@ -25,10 +25,16 @@
           "enableBackgroundPlayback": false,
           "enableBackgroundRecording": false
         }
-      ]
+      ],
+      "expo-asset",
+      "expo-secure-store"
     ],
     "extra": {
-      "bridgeDefaultPort": 19455
-    }
+      "bridgeDefaultPort": 19455,
+      "eas": {
+        "projectId": "875cf078-e033-4e80-a91c-6c2659195245"
+      }
+    },
+    "owner": "automationgod"
   }
 }

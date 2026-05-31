@@ -16,6 +16,10 @@ const responseTypes = Object.freeze({
   "tools.execute": "tools.result",
   "assistant.message": "assistant.reply",
   "voice.turn": "voice.reply",
+  "voice.stream.start": "voice.stream.started",
+  "voice.stream.audio": "voice.stream.audio.ack",
+  "voice.stream.end": "voice.reply",
+  "voice.stream.cancel": "voice.stream.cancelled",
 });
 
 export function createMobileBridgeServer(options = {}) {
@@ -131,7 +135,7 @@ export function createMobileBridgeServer(options = {}) {
       requestId = typeof parsed?.requestId === "string" ? parsed.requestId : null;
       const message = normalizeBridgeMessage(parsed);
       requestId = message.requestId;
-      const response = await routeMessage(state, message);
+      const response = await routeMessage(socket, state, message);
       sendJson(socket, response);
     } catch (error) {
       sendJson(
@@ -141,7 +145,7 @@ export function createMobileBridgeServer(options = {}) {
     }
   }
 
-  async function routeMessage(state, message) {
+  async function routeMessage(socket, state, message) {
     if (message.type === "auth") {
       const device = verifyMobileDevice(
         { deviceId: message.deviceId, deviceToken: message.deviceToken },
@@ -194,10 +198,10 @@ export function createMobileBridgeServer(options = {}) {
       throw new Error("Authenticate before using the mobile bridge.");
     }
 
-    return routeAuthenticatedMessage(message);
+    return routeAuthenticatedMessage(socket, state, message);
   }
 
-  async function routeAuthenticatedMessage(message) {
+  async function routeAuthenticatedMessage(socket, state, message) {
     log("info", "Mobile authenticated request", {
       type: message.type,
       requestId: message.requestId,
@@ -235,7 +239,50 @@ export function createMobileBridgeServer(options = {}) {
         return createBridgeResponse(
           responseTypes[message.type],
           message.requestId,
-          await callHandler("sendVoiceTurn", message.audio, message.history),
+          await callHandler("sendVoiceTurn", message.audio, message.history, {
+            ...createClientContext(socket, state),
+            requestId: message.requestId,
+          }),
+        );
+      case "voice.stream.start":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler("startVoiceStream", message.turnId, message.audio, message.history, {
+            ...createClientContext(socket, state),
+            requestId: message.requestId,
+          }),
+        );
+      case "voice.stream.audio":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler(
+            "appendVoiceStreamAudio",
+            message.turnId,
+            message.chunk,
+            message.sequence,
+            createClientContext(socket, state),
+          ),
+        );
+      case "voice.stream.end":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler("endVoiceStream", message.turnId, {
+            ...createClientContext(socket, state),
+            requestId: message.requestId,
+          }),
+        );
+      case "voice.stream.cancel":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler(
+            "cancelVoiceStream",
+            message.turnId,
+            createClientContext(socket, state),
+          ),
         );
       default:
         throw new Error(`Unsupported authenticated bridge message: ${message.type}`);
@@ -257,6 +304,18 @@ export function createMobileBridgeServer(options = {}) {
   }
 
   return { start, stop, getStatus, broadcast };
+}
+
+function createClientContext(socket, state) {
+  return {
+    device: state.device,
+    sendEvent(type, requestId, payload = {}) {
+      sendJson(socket, createBridgeResponse(type, requestId, payload));
+    },
+    isOpen() {
+      return socket.readyState === WebSocket.OPEN;
+    },
+  };
 }
 
 function sendJson(socket, payload) {

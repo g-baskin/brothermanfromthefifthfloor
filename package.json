@@ -7,6 +7,7 @@
     "start": "electron .",
     "mobile:install": "npm install --prefix mobile/brah-mobile",
     "mobile:android": "npm run android --prefix mobile/brah-mobile",
+    "mobile:dev-client": "npm run android --prefix mobile/brah-mobile",
     "mobile:start": "npm run start --prefix mobile/brah-mobile",
     "check": "biome check .",
     "format": "biome format --write .",

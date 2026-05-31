@@ -1,11 +1,11 @@
 import {
   createAudioPlayer,
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
-  useAudioRecorder,
+  useAudioStream,
 } from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import Constants from "expo-constants";
 import { File, Paths } from "expo-file-system";
 import * as Linking from "expo-linking";
 import * as SecureStore from "expo-secure-store";
@@ -28,10 +28,14 @@ const DEFAULT_PORT = "19455";
 const REQUEST_TIMEOUT_MS = 8000;
 const ASSISTANT_TIMEOUT_MS = 180000;
 const VOICE_TIMEOUT_MS = 180000;
-const VOICE_SAMPLE_RATE = 44100;
+const VOICE_SAMPLE_RATE = 24000;
+const VOICE_OUTPUT_SAMPLE_RATE = 24000;
 const VOICE_CHANNELS = 1;
 const MIN_VOICE_DURATION_MS = 350;
-const APP_BUILD_LABEL = "mobile-voice-v1";
+const VOICE_CANCELLED_MESSAGE = "Voice turn cancelled.";
+const APP_BUILD_LABEL = "mobile-live-voice-stream-v3-sdk56";
+const APP_RUNTIME_LABEL = Constants.appOwnership === "expo" ? "Expo Go" : "dev client";
+let nativeVoiceModule = null;
 
 export default function App() {
   const socketRef = useRef(null);
@@ -59,24 +63,28 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const chatMessagesRef = useRef([]);
   const voiceStartedAtRef = useRef(0);
+  const activeVoiceTurnRef = useRef(null);
   const voicePlayerRef = useRef(null);
+  const voicePipelineConnectedRef = useRef(false);
+  const voicePipelineTurnRef = useRef(null);
+  const voicePipelineFirstChunkRef = useRef(true);
   const [recordingVoice, setRecordingVoice] = useState(false);
+  const [streamingVoice, setStreamingVoice] = useState(false);
   const [voiceReady, setVoiceReady] = useState(false);
   const [voiceSummary, setVoiceSummary] = useState("");
   const [scanning, setScanning] = useState(false);
   const [pendingAutoPair, setPendingAutoPair] = useState(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const audioRecorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
+  const { stream: voiceInputStream } = useAudioStream({
     sampleRate: VOICE_SAMPLE_RATE,
-    numberOfChannels: VOICE_CHANNELS,
-    bitRate: 96000,
-    android: {
-      outputFormat: "mpeg4",
-      audioEncoder: "aac",
+    channels: VOICE_CHANNELS,
+    encoding: "int16",
+    onBuffer: (buffer) => {
+      queueVoiceStreamBuffer(activeVoiceTurnRef.current, buffer, sendBridgeRequest, (message) => {
+        setStatusText(message);
+      });
     },
   });
-
   const bridgeUrl = useMemo(() => {
     const cleanHost = host.trim();
     const cleanPort = port.trim() || DEFAULT_PORT;
@@ -103,13 +111,12 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      try {
-        audioRecorder.stop();
-      } catch {}
+      stopNativeMicrophoneStream(activeVoiceTurnRef.current).catch(() => {});
+      disconnectVoicePipeline(voicePipelineConnectedRef).catch(() => {});
       voicePlayerRef.current?.remove?.();
       voicePlayerRef.current = null;
     };
-  }, [audioRecorder]);
+  }, []);
 
   useEffect(() => {
     ensureClientId()
@@ -192,7 +199,13 @@ export default function App() {
           pendingRef.current.delete(requestId);
           reject(new Error("Bridge request timed out."));
         }, options.timeoutMs ?? REQUEST_TIMEOUT_MS);
-        pendingRef.current.set(requestId, { resolve, reject, timeoutId });
+        pendingRef.current.set(requestId, {
+          resolve,
+          reject,
+          timeoutId,
+          finalType: options.finalType,
+          onEvent: options.onEvent,
+        });
         socket.send(JSON.stringify(request));
       });
     },
@@ -412,11 +425,127 @@ export default function App() {
     }
   }, [authenticate, authenticated, sendBridgeRequest, toolArgs, toolName]);
 
-  const startVoiceTurn = useCallback(async () => {
-    if (busy || recordingVoice) {
+  const reloadBridgeState = useCallback(async () => {
+    if (recordingVoice || streamingVoice) {
+      setStatusText("Finish or cancel the active voice turn before reloading.");
       return;
     }
+    setBusy(true);
+    setStatusText("Reloading bridge state without disconnecting…");
     try {
+      if (!storedDevice) {
+        const socket = await connect();
+        if (socket?.readyState === WebSocket.OPEN) {
+          setStatusText("Connection is live. Pair this Android to reload desktop state.");
+        }
+        return;
+      }
+      const auth = await authenticate();
+      if (!auth) return;
+      const [statusResponse, toolsResponse] = await Promise.all([
+        sendBridgeRequest({ type: "openai.status.get" }),
+        sendBridgeRequest({ type: "tools.definitions.get" }),
+      ]);
+      ensureOk(statusResponse);
+      ensureOk(toolsResponse);
+      const tools = Array.isArray(toolsResponse.payload.tools) ? toolsResponse.payload.tools : [];
+      setOpenAIStatus(statusResponse.payload);
+      setToolCount(tools.length);
+      setStatusText(
+        `Reloaded bridge state. OpenAI ${
+          statusResponse.payload.connected ? "connected" : "not connected"
+        }; ${tools.length} tools loaded.`,
+      );
+    } catch (error) {
+      setStatusText(`Reload failed: ${error.message}`);
+      Alert.alert("Reload failed", error.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [authenticate, connect, recordingVoice, sendBridgeRequest, storedDevice, streamingVoice]);
+
+  const handleVoiceStreamEvent = useCallback((message) => {
+    const payload = message?.payload ?? {};
+    const turnId =
+      typeof payload.turnId === "string" ? payload.turnId : activeVoiceTurnRef.current?.turnId;
+    if (!turnId) {
+      return;
+    }
+    const activeTurn = activeVoiceTurnRef.current ?? { turnId };
+    if (!activeTurn.userMessageId) {
+      activeTurn.userMessageId = createRequestId();
+    }
+    if (!activeTurn.assistantMessageId) {
+      activeTurn.assistantMessageId = createRequestId();
+    }
+    activeTurn.turnId = turnId;
+    activeVoiceTurnRef.current = activeTurn;
+    setStreamingVoice(true);
+
+    if (message.type === "voice.reply.transcript") {
+      const transcript = cleanText(payload.transcript);
+      if (transcript) {
+        upsertChatMessageById(setChatMessages, activeTurn.userMessageId, "user", transcript);
+        setVoiceSummary(`You: ${transcript}\nBrah: …`);
+        setStatusText("Desktop transcribed your voice. Streaming Brah’s response…");
+      }
+      return;
+    }
+
+    if (message.type === "voice.reply.delta") {
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (delta) {
+        upsertChatMessageById(setChatMessages, activeTurn.assistantMessageId, "assistant", delta, {
+          append: true,
+        });
+        setVoiceSummary("Brah is streaming a reply…");
+        setStatusText("Streaming Brah’s response from desktop…");
+      }
+      return;
+    }
+
+    if (message.type === "voice.reply.audio_delta") {
+      const audioChunk = payload.audio?.base64;
+      activeTurn.audioChunks = [...(activeTurn.audioChunks ?? []), audioChunk].filter(Boolean);
+      if (audioChunk) {
+        const playedStreamingAudio = pushVoicePipelineAudio(
+          audioChunk,
+          turnId,
+          voicePipelineConnectedRef,
+          voicePipelineTurnRef,
+          voicePipelineFirstChunkRef,
+        );
+        activeTurn.playedStreamingAudio = activeTurn.playedStreamingAudio || playedStreamingAudio;
+      }
+      setStatusText("Playing streaming audio from desktop Brah…");
+      return;
+    }
+
+    if (message.type === "voice.reply.tool") {
+      const name = cleanText(payload.name) || "desktop tool";
+      const action = payload.status === "end" ? "Finished" : "Using";
+      setVoiceSummary(`${action} ${name}…`);
+      setStatusText(`${action} ${name} on desktop…`);
+      return;
+    }
+
+    if (message.type === "voice.reply.done") {
+      markVoicePipelineTurnComplete(turnId, voicePipelineFirstChunkRef);
+      setStatusText("Desktop finished streaming Brah’s response.");
+    }
+  }, []);
+
+  const startVoiceTurn = useCallback(async () => {
+    if (busy || recordingVoice || streamingVoice) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const auth = authenticated ? true : await authenticate();
+      if (!auth) {
+        setBusy(false);
+        return;
+      }
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
         Alert.alert("Microphone needed", "Allow microphone access to talk to desktop Brah.");
@@ -427,82 +556,155 @@ export default function App() {
         playsInSilentMode: true,
         interruptionMode: "doNotMix",
       });
-      voicePlayerRef.current?.pause?.();
-      voiceStartedAtRef.current = Date.now();
-      await audioRecorder.prepareToRecordAsync();
-      audioRecorder.record();
-      setRecordingVoice(true);
-      setVoiceReady(false);
-      setVoiceSummary("Listening… tap again or press Stop when finished.");
-      setStatusText("Listening from Android mic…");
-    } catch (error) {
-      setRecordingVoice(false);
-      setVoiceSummary(`Voice start failed: ${error.message}`);
-      Alert.alert("Voice failed", error.message);
-    }
-  }, [audioRecorder, busy, recordingVoice]);
-
-  const stopVoiceTurn = useCallback(async () => {
-    if (!recordingVoice) {
-      return;
-    }
-    try {
-      await audioRecorder.stop();
-    } catch {}
-    setRecordingVoice(false);
-
-    const durationMs = Date.now() - voiceStartedAtRef.current;
-    const uri = audioRecorder.uri;
-    if (durationMs < MIN_VOICE_DURATION_MS || !uri) {
-      setVoiceSummary("Record a little longer before sending.");
-      setStatusText("Voice turn was too short.");
-      return;
-    }
-    const recordingFile = new File(uri);
-    const base64 = await recordingFile.base64();
-
-    setBusy(true);
-    setVoiceReady(false);
-    setVoiceSummary("Sending voice to desktop Brah…");
-    setStatusText("Routing voice through desktop Realtime…");
-    try {
-      const auth = authenticated ? true : await authenticate();
-      if (!auth) return;
+      voicePlayerRef.current?.remove?.();
+      voicePlayerRef.current = null;
+      await connectVoicePipeline(voicePipelineConnectedRef);
+      const turnId = createRequestId();
+      const startRequestId = createRequestId();
+      activeVoiceTurnRef.current = {
+        turnId,
+        startRequestId,
+        endRequestId: null,
+        userMessageId: createRequestId(),
+        assistantMessageId: createRequestId(),
+        audioSequence: 0,
+        chunkSendChain: Promise.resolve(),
+        audioChunks: [],
+        cancelled: false,
+        micSubscription: null,
+      };
+      voicePipelineTurnRef.current = turnId;
+      voicePipelineFirstChunkRef.current = true;
+      await invalidateVoicePipelineTurn(turnId);
       const history = chatMessagesRef.current
         .map((item) => ({ role: item.role, text: item.text }))
         .slice(-12);
       const response = await sendBridgeRequest(
         {
-          type: "voice.turn",
+          type: "voice.stream.start",
+          requestId: startRequestId,
+          turnId,
           audio: {
-            base64,
             sampleRate: VOICE_SAMPLE_RATE,
             channels: VOICE_CHANNELS,
-            encoding: "aac_m4a",
-            mimeType: "audio/mp4",
+            encoding: "pcm16",
           },
           history,
         },
-        { timeoutMs: VOICE_TIMEOUT_MS },
+        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.started" },
       );
+      ensureOk(response);
+      await startNativeMicrophoneStream(activeVoiceTurnRef.current, voiceInputStream);
+      voiceStartedAtRef.current = Date.now();
+      setBusy(false);
+      setRecordingVoice(true);
+      setStreamingVoice(false);
+      setVoiceReady(false);
+      setVoiceSummary("Listening live… tap again when you’re done speaking, then Brah replies.");
+      setStatusText("Streaming your mic to desktop. Tap again to finish and get Brah’s reply…");
+    } catch (error) {
+      await stopNativeMicrophoneStream(activeVoiceTurnRef.current);
+      if (activeVoiceTurnRef.current?.turnId) {
+        try {
+          await sendBridgeRequest(
+            { type: "voice.stream.cancel", turnId: activeVoiceTurnRef.current.turnId },
+            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
+          );
+        } catch {}
+      }
+      activeVoiceTurnRef.current = null;
+      setBusy(false);
+      setRecordingVoice(false);
+      setStreamingVoice(false);
+      setVoiceSummary(`Voice start failed: ${error.message}`);
+      setStatusText(error.message);
+      Alert.alert("Voice failed", error.message);
+    }
+  }, [
+    authenticate,
+    authenticated,
+    busy,
+    recordingVoice,
+    sendBridgeRequest,
+    streamingVoice,
+    voiceInputStream,
+  ]);
+
+  const stopVoiceTurn = useCallback(async () => {
+    if (!recordingVoice) {
+      return;
+    }
+    const activeTurn = activeVoiceTurnRef.current;
+    await stopNativeMicrophoneStream(activeTurn);
+    setRecordingVoice(false);
+
+    const durationMs = Date.now() - voiceStartedAtRef.current;
+    if (durationMs < MIN_VOICE_DURATION_MS) {
+      setVoiceSummary("Record a little longer before sending.");
+      setStatusText("Voice turn was too short.");
+      if (activeTurn?.turnId) {
+        try {
+          await sendBridgeRequest(
+            { type: "voice.stream.cancel", turnId: activeTurn.turnId },
+            { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
+          );
+        } catch {}
+      }
+      activeVoiceTurnRef.current = null;
+      return;
+    }
+
+    setBusy(true);
+    setStreamingVoice(true);
+    setVoiceReady(false);
+    setVoiceSummary("Finalizing live voice with desktop Brah…");
+    setStatusText("Desktop is finishing your live voice turn…");
+    try {
+      if (!activeTurn?.turnId) {
+        throw new Error("No active voice turn to finish.");
+      }
+      await activeTurn.chunkSendChain;
+      const endRequestId = createRequestId();
+      activeTurn.endRequestId = endRequestId;
+      const response = await sendBridgeRequest(
+        {
+          type: "voice.stream.end",
+          requestId: endRequestId,
+          turnId: activeTurn.turnId,
+        },
+        {
+          timeoutMs: VOICE_TIMEOUT_MS,
+          finalType: "voice.reply",
+          onEvent: handleVoiceStreamEvent,
+        },
+      );
+      if (activeVoiceTurnRef.current?.cancelled) {
+        return;
+      }
       ensureOk(response);
       const transcript = cleanText(response.payload?.transcript);
       const reply = cleanText(response.payload?.reply) || "Done.";
       const audio = response.payload?.audio;
-      setChatMessages((messages) =>
-        [
-          ...messages,
-          transcript ? { id: createRequestId(), role: "user", text: transcript } : null,
-          { id: createRequestId(), role: "assistant", text: reply },
-        ].filter(Boolean),
-      );
+      if (transcript) {
+        upsertChatMessageById(setChatMessages, activeTurn.userMessageId, "user", transcript);
+      }
+      upsertChatMessageById(setChatMessages, activeTurn.assistantMessageId, "assistant", reply);
       if (audio?.base64) {
-        await playAssistantAudio(audio, voicePlayerRef);
+        await playAssistantAudio(audio, voicePlayerRef, {
+          autoplay: !activeTurn.playedStreamingAudio,
+        });
         setVoiceReady(true);
+      } else {
+        markVoicePipelineTurnComplete(activeTurn.turnId, voicePipelineFirstChunkRef);
       }
       setVoiceSummary(transcript ? `You: ${transcript}\nBrah: ${reply}` : `Brah: ${reply}`);
       setStatusText("Brah replied by voice from desktop.");
     } catch (error) {
+      if (error.message === VOICE_CANCELLED_MESSAGE) {
+        setVoiceSummary(VOICE_CANCELLED_MESSAGE);
+        setStatusText("Cancelled mobile voice turn.");
+        return;
+      }
       setVoiceSummary(`Voice error: ${error.message}`);
       setChatMessages((messages) => [
         ...messages,
@@ -512,15 +714,63 @@ export default function App() {
       Alert.alert("Voice failed", error.message);
     } finally {
       setBusy(false);
+      setStreamingVoice(false);
+      activeVoiceTurnRef.current = null;
     }
-  }, [audioRecorder, authenticate, authenticated, recordingVoice, sendBridgeRequest]);
+  }, [handleVoiceStreamEvent, recordingVoice, sendBridgeRequest]);
 
-  const replayAssistantAudio = useCallback(() => {
+  const cancelVoiceTurn = useCallback(async () => {
+    const activeTurn = activeVoiceTurnRef.current;
+    if (activeTurn) {
+      activeTurn.cancelled = true;
+      for (const requestId of [
+        activeTurn.startRequestId,
+        activeTurn.endRequestId,
+        activeTurn.requestId,
+      ]) {
+        if (!requestId) continue;
+        const pending = pendingRef.current.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timeoutId);
+          pendingRef.current.delete(requestId);
+          pending.reject(new Error(VOICE_CANCELLED_MESSAGE));
+        }
+      }
+    }
+    await stopNativeMicrophoneStream(activeTurn);
+    if (activeTurn?.turnId) {
+      await invalidateVoicePipelineTurn(createRequestId());
+    }
+    setRecordingVoice(false);
+    setStreamingVoice(false);
+    setBusy(false);
+    setVoiceSummary(VOICE_CANCELLED_MESSAGE);
+    setStatusText("Cancelled mobile voice turn.");
+    if (activeTurn?.turnId) {
+      try {
+        const response = await sendBridgeRequest(
+          { type: "voice.stream.cancel", turnId: activeTurn.turnId },
+          { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.cancelled" },
+        );
+        ensureOk(response);
+      } catch (error) {
+        setStatusText(`Cancel failed: ${error.message}`);
+      }
+    }
+    activeVoiceTurnRef.current = null;
+  }, [sendBridgeRequest]);
+
+  const replayAssistantAudio = useCallback(async () => {
     const player = voicePlayerRef.current;
     if (!player) {
       return;
     }
     try {
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        interruptionMode: "doNotMix",
+      });
       player.seekTo?.(0);
       player.play();
     } catch (error) {
@@ -590,7 +840,9 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <View style={styles.hero}>
-          <Text style={styles.eyebrow}>Brah Mobile · {APP_BUILD_LABEL}</Text>
+          <Text style={styles.eyebrow}>
+            Brah Mobile · {APP_BUILD_LABEL} · {APP_RUNTIME_LABEL}
+          </Text>
           <Text style={styles.title}>Android bridge client</Text>
           <View style={styles.diagnosticPill}>
             <Text style={styles.diagnosticLabel}>Client ID</Text>
@@ -626,6 +878,12 @@ export default function App() {
               label={connected ? "Reconnect" : "Connect"}
               onPress={connect}
               disabled={busy || !bridgeUrl}
+            />
+            <Button
+              label="Reload"
+              onPress={reloadBridgeState}
+              disabled={busy || !bridgeUrl || recordingVoice || streamingVoice}
+              secondary
             />
             <Button label="Disconnect" onPress={closeSocket} disabled={!connected} secondary />
           </View>
@@ -711,29 +969,40 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Voice push-to-talk</Text>
           <Text style={styles.hint}>
-            Tap to start recording, then tap again to send. Audio routes through desktop OpenAI
-            Realtime, so memory, screen, and tool access stay on Brah desktop.
+            Tap to start streaming your mic, then tap again when you’re done speaking. Brah starts
+            replying after the push-to-talk turn is finished, while tools stay on Brah desktop.
           </Text>
           <Pressable
             onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
-            disabled={busy || !storedDevice}
+            disabled={(busy && !recordingVoice) || streamingVoice || !storedDevice}
             style={({ pressed }) => [
               styles.voiceButton,
               recordingVoice && styles.voiceButtonRecording,
-              (busy || !storedDevice) && styles.buttonDisabled,
-              pressed && !busy && storedDevice && styles.buttonPressed,
+              ((busy && !recordingVoice) || streamingVoice || !storedDevice) &&
+                styles.buttonDisabled,
+              pressed &&
+                !(busy && !recordingVoice) &&
+                !streamingVoice &&
+                storedDevice &&
+                styles.buttonPressed,
             ]}
           >
             <Text style={styles.voiceButtonText}>
-              {recordingVoice ? "Recording… tap to send" : "Tap to record"}
+              {recordingVoice ? "Listening… tap when done" : "Start push-to-talk"}
             </Text>
           </Pressable>
           <View style={styles.row}>
             <Button
-              label={recordingVoice ? "Stop & send" : "Start recording"}
+              label={recordingVoice ? "Finish and get reply" : "Start mic"}
               onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
-              disabled={busy || !storedDevice}
+              disabled={(busy && !recordingVoice) || streamingVoice || !storedDevice}
               secondary={!recordingVoice}
+            />
+            <Button
+              label="Cancel reply"
+              onPress={cancelVoiceTurn}
+              disabled={!streamingVoice}
+              secondary
             />
             <Button
               label="Replay reply"
@@ -835,6 +1104,16 @@ function handleSocketMessage(pendingRequests, data) {
   }
   const pending = pendingRequests.get(parsed.requestId);
   if (!pending) return;
+  if (parsed.type === "error" || parsed.ok === false) {
+    clearTimeout(pending.timeoutId);
+    pendingRequests.delete(parsed.requestId);
+    pending.reject(new Error(parsed.error?.message || "Bridge request failed."));
+    return;
+  }
+  if (pending.finalType && parsed.type !== pending.finalType) {
+    pending.onEvent?.(parsed);
+    return;
+  }
   clearTimeout(pending.timeoutId);
   pendingRequests.delete(parsed.requestId);
   pending.resolve(parsed);
@@ -842,6 +1121,20 @@ function handleSocketMessage(pendingRequests, data) {
 
 function createRequestId() {
   return `android-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+    return "";
+  }
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const batchSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += batchSize) {
+    const batch = bytes.subarray(offset, offset + batchSize);
+    binary += String.fromCharCode(...batch);
+  }
+  return globalThis.btoa(binary);
 }
 
 function ensureOk(response) {
@@ -854,7 +1147,169 @@ function cleanText(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-async function playAssistantAudio(audio, playerRef) {
+function loadNativeVoiceModule() {
+  if (nativeVoiceModule !== null) {
+    return nativeVoiceModule;
+  }
+  nativeVoiceModule = requireOptionalPipelineModule();
+  return nativeVoiceModule;
+}
+
+function requireOptionalPipelineModule() {
+  try {
+    return globalThis.expo?.modules?.ExpoPlayAudioStream ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function queueVoiceStreamBuffer(activeTurn, buffer, sendBridgeRequest, setStatusText) {
+  if (!activeTurn?.turnId || activeTurn.cancelled) {
+    return;
+  }
+  const chunk = arrayBufferToBase64(buffer?.data);
+  if (!chunk) {
+    return;
+  }
+  const sequence = activeTurn.audioSequence ?? 0;
+  activeTurn.audioSequence = sequence + 1;
+  activeTurn.chunkSendChain = (activeTurn.chunkSendChain ?? Promise.resolve())
+    .then(() =>
+      sendBridgeRequest(
+        {
+          type: "voice.stream.audio",
+          turnId: activeTurn.turnId,
+          chunk,
+          sequence,
+        },
+        { timeoutMs: REQUEST_TIMEOUT_MS, finalType: "voice.stream.audio.ack" },
+      ),
+    )
+    .catch((error) => {
+      setStatusText?.(`Mic stream chunk failed: ${error.message}`);
+    });
+}
+
+async function startNativeMicrophoneStream(activeTurn, voiceInputStream) {
+  if (!activeTurn?.turnId) {
+    throw new Error("No active voice turn to stream.");
+  }
+  if (!voiceInputStream?.start) {
+    throw new Error(
+      "Expo audio stream is unavailable in this runtime. Update Expo Go for SDK 55 support.",
+    );
+  }
+  activeTurn.voiceInputStream = voiceInputStream;
+  await voiceInputStream.start();
+}
+
+async function stopNativeMicrophoneStream(activeTurn) {
+  activeTurn?.micSubscription?.remove?.();
+  activeTurn?.voiceInputStream?.stop?.();
+  if (activeTurn) {
+    activeTurn.micSubscription = null;
+    activeTurn.voiceInputStream = null;
+  }
+}
+
+async function connectVoicePipeline(connectedRef) {
+  if (connectedRef.current) {
+    return true;
+  }
+  const module = loadNativeVoiceModule();
+  if (typeof module?.connectPipeline !== "function") {
+    return false;
+  }
+  try {
+    await module.connectPipeline({
+      sampleRate: VOICE_OUTPUT_SAMPLE_RATE,
+      channelCount: VOICE_CHANNELS,
+      targetBufferMs: 80,
+      audioMode: "doNotMix",
+    });
+    connectedRef.current = true;
+    return true;
+  } catch {
+    connectedRef.current = false;
+    return false;
+  }
+}
+
+async function disconnectVoicePipeline(connectedRef) {
+  if (!connectedRef.current || !nativeVoiceModule?.disconnectPipeline) {
+    return;
+  }
+  try {
+    await nativeVoiceModule.disconnectPipeline();
+  } finally {
+    connectedRef.current = false;
+  }
+}
+
+async function invalidateVoicePipelineTurn(turnId) {
+  const module = nativeVoiceModule ?? loadNativeVoiceModule();
+  if (typeof module?.invalidatePipelineTurn !== "function") {
+    return;
+  }
+  try {
+    await module.invalidatePipelineTurn({ turnId });
+  } catch {}
+}
+
+function pushVoicePipelineAudio(
+  audio,
+  turnId,
+  connectedRef,
+  currentTurnRef,
+  firstChunkRef,
+  { isLastChunk = false } = {},
+) {
+  const module = nativeVoiceModule;
+  if (!connectedRef.current || typeof module?.pushPipelineAudioSync !== "function") {
+    return false;
+  }
+  const isFirstChunk = firstChunkRef.current || currentTurnRef.current !== turnId;
+  currentTurnRef.current = turnId;
+  firstChunkRef.current = false;
+  return module.pushPipelineAudioSync({
+    audio,
+    turnId,
+    isFirstChunk,
+    isLastChunk,
+  });
+}
+
+function markVoicePipelineTurnComplete(turnId, firstChunkRef) {
+  const module = nativeVoiceModule;
+  if (firstChunkRef.current || typeof module?.pushPipelineAudioSync !== "function") {
+    return;
+  }
+  module.pushPipelineAudioSync({
+    audio: "",
+    turnId,
+    isLastChunk: true,
+  });
+}
+
+function upsertChatMessageById(setChatMessages, id, role, text, { append = false } = {}) {
+  const cleanId = typeof id === "string" && id ? id : createRequestId();
+  setChatMessages((messages) => {
+    const existingIndex = messages.findIndex((message) => message.id === cleanId);
+    if (existingIndex === -1) {
+      return [...messages, { id: cleanId, role, text }];
+    }
+    const next = [...messages];
+    const existing = next[existingIndex];
+    next[existingIndex] = {
+      ...existing,
+      text: append ? `${existing.text ?? ""}${text}` : text,
+    };
+    return next;
+  });
+  return cleanId;
+}
+
+async function playAssistantAudio(audio, playerRef, { autoplay = true } = {}) {
   if (typeof audio?.base64 !== "string" || !audio.base64) {
     return;
   }
@@ -865,12 +1320,14 @@ async function playAssistantAudio(audio, playerRef) {
   previous?.remove?.();
   const player = createAudioPlayer({ uri: file.uri }, { keepAudioSessionActive: true });
   playerRef.current = player;
-  await setAudioModeAsync({
-    allowsRecording: false,
-    playsInSilentMode: true,
-    interruptionMode: "doNotMix",
-  });
-  player.play();
+  if (autoplay) {
+    await setAudioModeAsync({
+      allowsRecording: false,
+      playsInSilentMode: true,
+      interruptionMode: "doNotMix",
+    });
+    player.play();
+  }
 }
 
 function formatPairingError(message) {

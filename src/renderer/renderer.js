@@ -639,7 +639,7 @@ function renderMobilePairingQr(payload) {
     selectedMobileQr === "expo" ? "One-scan setup" : "Manual pair QR";
   mobileQrInstructionsElement.textContent =
     selectedMobileQr === "expo"
-      ? "Scan this with Expo Go to open Brah Mobile and load the pairing details."
+      ? "Scan this with Android Camera to open Brah Mobile and load the pairing details."
       : "Use this only if Brah Mobile is already open: tap Scan QR, then scan this code.";
 
   if (payload?.expoQrDataUrl) {
@@ -653,8 +653,8 @@ function renderMobilePairingQr(payload) {
     mobilePairingQrElement.removeAttribute("src");
   }
   mobileExpoUrlElement.textContent = expoUrl
-    ? `Expo Go fallback with pairing: ${expoUrl}`
-    : "Fallback: run npm run mobile:start, then open the printed Expo URL.";
+    ? `Open Brah Mobile fallback: ${expoUrl}`
+    : "Fallback: open Brah Mobile, then use Manual pair QR.";
   mobilePairingUrlElement.textContent = pairingDeepLink
     ? `Open link fallback: ${pairingDeepLink}`
     : pairingUrl

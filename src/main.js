@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -177,6 +177,7 @@ let windowFadeResolve = null;
 let activeComputerUseController = null;
 let mobileBridgeServer = null;
 let mobileBridgeHost = "127.0.0.1";
+const mobileVoiceStreams = new Map();
 let mobileDevServerProcess = null;
 let mobileDevServerPort = null;
 // User-chosen window position (set by dragging the panel), persisted across
@@ -573,14 +574,13 @@ async function handleMobileAssistantMessage(message, history = []) {
   }
 }
 
-async function handleMobileVoiceTurn(audio, history = []) {
+async function handleMobileVoiceTurn(audio, history = [], context = {}) {
   const normalizedAudio = normalizeMobileVoiceAudio(audio);
-  const credentials = await getFreshOpenAICredentials();
-  if (!credentials) {
-    throw new Error("Connect OpenAI on desktop before using mobile voice.");
-  }
+  const credentials = await requireFreshOpenAICredentialsForMobileVoice();
   const startedAt = Date.now();
+  const streamContext = createMobileVoiceStreamContext(randomUUID(), context);
   await writeDiagnosticLog("mobile.voice.start", {
+    turnId: streamContext.turnId,
     sampleRate: normalizedAudio.sampleRate,
     channels: normalizedAudio.channels,
     encoding: normalizedAudio.encoding,
@@ -588,35 +588,262 @@ async function handleMobileVoiceTurn(audio, history = []) {
     bytes: normalizedAudio.byteLength,
   });
   try {
-    const result = await runMobileVoiceResponse(credentials, normalizedAudio, history);
-    if (result.transcript) {
+    const result = await runMobileVoiceResponse(
+      credentials,
+      normalizedAudio,
+      history,
+      streamContext,
+    );
+    const finalResult = { ...result, turnId: streamContext.turnId };
+    if (finalResult.transcript) {
       void recordAssistantChatTurn({
         role: "user",
-        content: result.transcript,
+        content: finalResult.transcript,
         source: "mobile_voice",
       });
     }
-    if (result.reply) {
+    if (finalResult.reply) {
       void recordAssistantChatTurn({
         role: "assistant",
-        content: result.reply,
+        content: finalResult.reply,
         source: "mobile_voice",
       });
     }
+    sendMobileVoiceStreamEvent(streamContext, "voice.reply.done", finalResult);
     await writeDiagnosticLog("mobile.voice.finish", {
+      turnId: streamContext.turnId,
       elapsedMs: Date.now() - startedAt,
-      transcript: result.transcript.slice(0, 500),
-      reply: result.reply.slice(0, 500),
-      audioBytes: result.audio?.byteLength ?? 0,
+      transcript: String(finalResult.transcript ?? "").slice(0, 500),
+      reply: String(finalResult.reply ?? "").slice(0, 500),
+      audioBytes: finalResult.audio?.byteLength ?? 0,
     });
-    return result;
+    return finalResult;
   } catch (error) {
     await writeDiagnosticLog("mobile.voice.error", {
+      turnId: streamContext.turnId,
       elapsedMs: Date.now() - startedAt,
       error: formatDiagnosticError(error),
     });
     throw error;
   }
+}
+
+function createMobileVoiceStreamContext(turnId, bridgeContext = {}) {
+  return {
+    turnId,
+    requestId: bridgeContext.requestId,
+    sendEvent: bridgeContext.sendEvent,
+    isOpen: bridgeContext.isOpen,
+  };
+}
+
+function createMobileVoiceRealtimeListeners(streamContext) {
+  return {
+    onAudioDelta: ({ delta }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.audio_delta", {
+        audio: {
+          base64: delta,
+          format: "pcm16",
+          sampleRate: mobileVoiceDefaults.outputSampleRate,
+          channels: mobileVoiceDefaults.outputChannels,
+        },
+      });
+    },
+    onTextDelta: ({ delta }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.delta", { delta });
+    },
+    onInputTranscript: ({ transcript }) => {
+      sendMobileVoiceStreamEvent(streamContext, "voice.reply.transcript", { transcript });
+    },
+  };
+}
+
+function sendMobileVoiceStreamEvent(streamContext, type, payload = {}) {
+  if (typeof streamContext?.sendEvent !== "function") {
+    return;
+  }
+  if (typeof streamContext.isOpen === "function" && !streamContext.isOpen()) {
+    return;
+  }
+  streamContext.sendEvent(type, streamContext.requestId, {
+    turnId: streamContext.turnId,
+    ...payload,
+  });
+}
+
+function registerMobileVoiceStream(streamContext, session) {
+  mobileVoiceStreams.set(streamContext.turnId, {
+    turnId: streamContext.turnId,
+    requestId: streamContext.requestId,
+    session,
+    startedAt: Date.now(),
+  });
+}
+
+function unregisterMobileVoiceStream(turnId, session) {
+  const active = mobileVoiceStreams.get(turnId);
+  if (!active || active.session === session) {
+    mobileVoiceStreams.delete(turnId);
+  }
+}
+
+async function startMobileVoiceStream(turnId, audio, history = [], context = {}) {
+  const normalizedTurnId = normalizeMobileVoiceTurnId(turnId);
+  if (mobileVoiceStreams.has(normalizedTurnId)) {
+    throw new Error("Mobile voice stream is already active.");
+  }
+  const streamAudio = normalizeMobileVoiceStreamAudio(audio);
+  const credentials = await requireFreshOpenAICredentialsForMobileVoice();
+  const streamContext = createMobileVoiceStreamContext(normalizedTurnId, context);
+  const session = await createMobileLiveVoiceStreamSession(
+    credentials,
+    streamAudio,
+    history,
+    streamContext,
+  );
+  mobileVoiceStreams.set(normalizedTurnId, {
+    turnId: normalizedTurnId,
+    requestId: streamContext.requestId,
+    session,
+    mode: "live",
+    byteLength: 0,
+    chunks: 0,
+    startedAt: Date.now(),
+  });
+  await writeDiagnosticLog("mobile.voice.stream.start", {
+    turnId: normalizedTurnId,
+    sampleRate: streamAudio.sampleRate,
+    channels: streamAudio.channels,
+  });
+  return { turnId: normalizedTurnId, started: true };
+}
+
+async function appendMobileVoiceStreamAudio(turnId, chunk, sequence) {
+  const normalizedTurnId = normalizeMobileVoiceTurnId(turnId);
+  const active = mobileVoiceStreams.get(normalizedTurnId);
+  if (!active?.session?.appendAudio) {
+    throw new Error("Mobile voice stream is not active.");
+  }
+  const normalizedChunk = normalizeMobileVoiceStreamChunk(chunk);
+  active.session.appendAudio(normalizedChunk);
+  active.byteLength += Buffer.from(normalizedChunk, "base64").length;
+  active.chunks += 1;
+  return { turnId: normalizedTurnId, sequence, received: true };
+}
+
+async function endMobileVoiceStream(turnId, context = {}) {
+  const normalizedTurnId = normalizeMobileVoiceTurnId(turnId);
+  const active = mobileVoiceStreams.get(normalizedTurnId);
+  if (!active?.session?.finish) {
+    throw new Error("Mobile voice stream is not active.");
+  }
+  const startedAt = active.startedAt ?? Date.now();
+  if (context.requestId) {
+    active.session.setRequestId?.(context.requestId);
+  }
+  try {
+    const result = await active.session.finish();
+    const finalResult = { ...result, turnId: normalizedTurnId };
+    if (finalResult.transcript) {
+      void recordAssistantChatTurn({
+        role: "user",
+        content: finalResult.transcript,
+        source: "mobile_voice",
+      });
+    }
+    if (finalResult.reply) {
+      void recordAssistantChatTurn({
+        role: "assistant",
+        content: finalResult.reply,
+        source: "mobile_voice",
+      });
+    }
+    sendMobileVoiceStreamEvent(active.session.streamContext, "voice.reply.done", finalResult);
+    await writeDiagnosticLog("mobile.voice.stream.finish", {
+      turnId: normalizedTurnId,
+      elapsedMs: Date.now() - startedAt,
+      chunks: active.chunks,
+      bytes: active.byteLength,
+      transcript: String(finalResult.transcript ?? "").slice(0, 500),
+      reply: String(finalResult.reply ?? "").slice(0, 500),
+      audioBytes: finalResult.audio?.byteLength ?? 0,
+    });
+    return finalResult;
+  } catch (error) {
+    await writeDiagnosticLog("mobile.voice.stream.error", {
+      turnId: normalizedTurnId,
+      elapsedMs: Date.now() - startedAt,
+      error: formatDiagnosticError(error),
+    });
+    throw error;
+  } finally {
+    mobileVoiceStreams.delete(normalizedTurnId);
+    active.session.close?.();
+  }
+}
+
+async function cancelMobileVoiceStream(turnId) {
+  const normalizedTurnId = normalizeMobileVoiceTurnId(turnId);
+  const active = mobileVoiceStreams.get(normalizedTurnId);
+  if (!active) {
+    return { turnId: normalizedTurnId, cancelled: false };
+  }
+  mobileVoiceStreams.delete(normalizedTurnId);
+  try {
+    active.session.cancelResponse?.();
+  } catch {}
+  try {
+    active.session.close?.();
+  } catch {}
+  return { turnId: normalizedTurnId, cancelled: true };
+}
+
+async function requireFreshOpenAICredentialsForMobileVoice() {
+  const credentials = await getFreshOpenAICredentials();
+  if (!credentials) {
+    throw new Error("Connect OpenAI on desktop before using mobile voice.");
+  }
+  return credentials;
+}
+
+function normalizeMobileVoiceTurnId(turnId) {
+  const normalizedTurnId = typeof turnId === "string" ? turnId.trim() : "";
+  if (!normalizedTurnId) {
+    throw new Error("Mobile voice turn id is required.");
+  }
+  return normalizedTurnId;
+}
+
+function normalizeMobileVoiceStreamAudio(audio) {
+  if (!isRecord(audio)) {
+    throw new Error("Voice stream audio settings are required.");
+  }
+  const sampleRate = Number(audio.sampleRate);
+  const channels = Number(audio.channels);
+  const encoding = typeof audio.encoding === "string" ? audio.encoding.trim().toLowerCase() : "";
+  if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000) {
+    throw new Error("Voice stream audio sample rate is invalid.");
+  }
+  if (!Number.isInteger(channels) || channels < 1 || channels > 2) {
+    throw new Error("Voice stream audio channel count is invalid.");
+  }
+  if (encoding !== "pcm16") {
+    throw new Error("Voice stream audio encoding must be pcm16.");
+  }
+  return {
+    sampleRate,
+    channels,
+    encoding,
+    mimeType: typeof audio.mimeType === "string" ? audio.mimeType : "",
+  };
+}
+
+function normalizeMobileVoiceStreamChunk(chunk) {
+  const normalizedChunk = Buffer.from(String(chunk), "base64").toString("base64");
+  if (!normalizedChunk || Buffer.from(normalizedChunk, "base64").length === 0) {
+    throw new Error("Voice stream audio chunk is required.");
+  }
+  return normalizedChunk;
 }
 
 function normalizeMobileVoiceAudio(audio) {
@@ -822,6 +1049,10 @@ async function startMobileBridge(host = "127.0.0.1") {
       executeRealtimeTool: executeToolRequest,
       sendAssistantMessage: handleMobileAssistantMessage,
       sendVoiceTurn: handleMobileVoiceTurn,
+      startVoiceStream: startMobileVoiceStream,
+      appendVoiceStreamAudio: appendMobileVoiceStreamAudio,
+      endVoiceStream: endMobileVoiceStream,
+      cancelVoiceStream: cancelMobileVoiceStream,
     },
     logger: {
       info: (message, details) => safeConsole("info", message, details),
@@ -922,6 +1153,9 @@ async function stopMobileBridge() {
   if (!mobileBridgeServer) {
     return getMobileBridgeStatus();
   }
+  for (const turnId of mobileVoiceStreams.keys()) {
+    await cancelMobileVoiceStream(turnId);
+  }
   const server = mobileBridgeServer;
   mobileBridgeServer = null;
   const status = await server.stop();
@@ -938,12 +1172,13 @@ function getMobileBridgeStatus() {
     clients: 0,
   };
   const pairingPayload = createMobilePairingPayload(status);
+  const pairingDeepLink = createMobilePairingDeepLink(pairingPayload);
   return {
     ...status,
     pairing: formatPairingStatus(getPairingSession()),
     pairingPayload,
-    pairingDeepLink: createMobilePairingDeepLink(pairingPayload),
-    expoUrl: createMobileExpoUrl(status.host, pairingPayload),
+    pairingDeepLink,
+    expoUrl: pairingDeepLink,
     mobileDevServerPort,
     lanHost: getLanHostAddress(),
     devices: listMobileDevices(getDatabasePath()),
@@ -961,8 +1196,8 @@ async function createMobilePairingQrPayload() {
         width: 256,
       })
     : null;
-  const expoQrDataUrl = status.expoUrl
-    ? await QRCode.toDataURL(status.expoUrl, {
+  const expoQrDataUrl = pairingDeepLink
+    ? await QRCode.toDataURL(pairingDeepLink, {
         errorCorrectionLevel: "M",
         margin: 1,
         width: 256,
@@ -972,7 +1207,7 @@ async function createMobilePairingQrPayload() {
     pairingPayload,
     pairingDeepLink,
     pairingQrDataUrl: qrDataUrl,
-    expoUrl: status.expoUrl,
+    expoUrl: pairingDeepLink,
     expoQrDataUrl,
   };
 }
@@ -1003,22 +1238,6 @@ function createMobilePairingDeepLink(pairingPayload) {
     expiresAt: String(pairingPayload.expiresAt),
   });
   return `brahmobile://pair?${params.toString()}`;
-}
-
-function createMobileExpoUrl(host, pairingPayload) {
-  if (typeof host !== "string" || host === "127.0.0.1" || !mobileDevServerPort || !pairingPayload) {
-    return null;
-  }
-  const params = new URLSearchParams({
-    type: pairingPayload.type,
-    version: String(pairingPayload.version),
-    host: pairingPayload.host,
-    port: String(pairingPayload.port),
-    pairingCode: pairingPayload.pairingCode,
-    expiresAt: String(pairingPayload.expiresAt),
-    autoPair: "1",
-  });
-  return `exp://${host}:${mobileDevServerPort}/--/pair?${params.toString()}`;
 }
 
 function getLanHostAddress() {
@@ -1668,18 +1887,24 @@ async function runMobileAssistantResponse(credentials, message, history = []) {
   }
 }
 
-async function runMobileVoiceResponse(credentials, audio, history = []) {
+async function runMobileVoiceResponse(credentials, audio, history = [], streamContext = {}) {
   if (audio.encoding === "aac_m4a") {
     const transcript = await transcribeMobileVoiceRecording(credentials, audio);
     if (!transcript) {
       throw new Error("I couldn't hear enough speech in that recording.");
     }
-    return runMobileVoiceTextResponse(credentials, transcript, history);
+    sendMobileVoiceStreamEvent(streamContext, "voice.reply.transcript", { transcript });
+    return runMobileVoiceTextResponse(credentials, transcript, history, streamContext);
   }
-  return runMobileRealtimePcmVoiceResponse(credentials, audio, history);
+  return runMobileRealtimePcmVoiceResponse(credentials, audio, history, streamContext);
 }
 
-async function runMobileRealtimePcmVoiceResponse(credentials, audio, history = []) {
+async function createMobileLiveVoiceStreamSession(
+  credentials,
+  audio,
+  history = [],
+  streamContext = {},
+) {
   const settings = await loadSettings();
   const realtimeSettings = resolveRealtimeSettings(settings);
   const instructions = buildMobileVoiceInstructions(settings);
@@ -1688,7 +1913,105 @@ async function runMobileRealtimePcmVoiceResponse(credentials, audio, history = [
     voice: realtimeSettings.voice,
     speed: realtimeSettings.speed,
   });
-  const session = createMobileRealtimeSession(clientSecret);
+  const session = createMobileRealtimeSession(
+    clientSecret,
+    createMobileVoiceRealtimeListeners(streamContext),
+  );
+  await session.connect();
+  await session.update({
+    instructions,
+    tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
+    tool_choice: "auto",
+    output_modalities: ["audio"],
+    audio: {
+      input: {
+        format: { type: "audio/pcm", rate: audio.sampleRate },
+        noise_reduction: { type: "near_field" },
+        transcription: { model: "gpt-4o-transcribe" },
+        turn_detection: null,
+      },
+      output: {
+        format: { type: "audio/pcm", rate: mobileVoiceDefaults.outputSampleRate },
+        voice: realtimeSettings.voice,
+        speed: realtimeSettings.speed,
+      },
+    },
+  });
+  for (const item of normalizeMobileAssistantHistory(history)) {
+    session.sendEvent({ type: "conversation.item.create", item });
+  }
+
+  return {
+    streamContext,
+    appendAudio(chunk) {
+      session.sendEvent({ type: "input_audio_buffer.append", audio: chunk });
+    },
+    async finish() {
+      session.sendEvent({ type: "input_audio_buffer.commit" });
+      let responseResult = await session.createResponse({ output_modalities: ["audio"] });
+      for (let round = 0; round < mobileVoiceDefaults.maxToolRounds; round += 1) {
+        const calls = getRealtimeFunctionCalls(responseResult.response);
+        if (calls.length === 0) {
+          return createMobileVoiceTurnResult(responseResult);
+        }
+
+        const realtimeInputs = [];
+        for (const call of calls) {
+          const result = await executeMobileAssistantToolForVoice(call, streamContext);
+          await sendMobileToolOutput(session, call, result);
+          if (isRecord(result?.realtimeInput)) {
+            realtimeInputs.push(result.realtimeInput);
+          }
+        }
+        responseResult = await session.createResponse({
+          output_modalities: ["audio"],
+          ...(realtimeInputs.length > 0
+            ? {
+                input: realtimeInputs,
+                instructions:
+                  "Use the attached screenshot image to answer Greg's mobile voice request directly.",
+              }
+            : {}),
+        });
+      }
+
+      return {
+        transcript: responseResult.inputTranscripts.join("\n").trim(),
+        reply: "I ran several tool steps, but need you to narrow that down before I continue.",
+        audio: null,
+      };
+    },
+    setRequestId(requestId) {
+      streamContext.requestId = requestId;
+    },
+    cancelResponse() {
+      session.cancelResponse?.();
+    },
+    close() {
+      session.close();
+    },
+  };
+}
+
+async function runMobileRealtimePcmVoiceResponse(
+  credentials,
+  audio,
+  history = [],
+  streamContext = {},
+) {
+  const settings = await loadSettings();
+  const realtimeSettings = resolveRealtimeSettings(settings);
+  const instructions = buildMobileVoiceInstructions(settings);
+  const clientSecret = await createRealtimeClientSecret(credentials, {
+    instructions,
+    voice: realtimeSettings.voice,
+    speed: realtimeSettings.speed,
+  });
+  const session = createMobileRealtimeSession(
+    clientSecret,
+    createMobileVoiceRealtimeListeners(streamContext),
+  );
+  registerMobileVoiceStream(streamContext, session);
   try {
     await session.connect();
     await session.update({
@@ -1728,7 +2051,7 @@ async function runMobileRealtimePcmVoiceResponse(credentials, audio, history = [
 
       const realtimeInputs = [];
       for (const call of calls) {
-        const result = await executeMobileAssistantTool(call);
+        const result = await executeMobileAssistantToolForVoice(call, streamContext);
         await sendMobileToolOutput(session, call, result);
         if (isRecord(result?.realtimeInput)) {
           realtimeInputs.push(result.realtimeInput);
@@ -1752,6 +2075,7 @@ async function runMobileRealtimePcmVoiceResponse(credentials, audio, history = [
       audio: null,
     };
   } finally {
+    unregisterMobileVoiceStream(streamContext.turnId, session);
     session.close();
   }
 }
@@ -1772,7 +2096,12 @@ async function transcribeMobileVoiceRecording(credentials, audio) {
   return typeof result.text === "string" ? result.text.trim() : "";
 }
 
-async function runMobileVoiceTextResponse(credentials, transcript, history = []) {
+async function runMobileVoiceTextResponse(
+  credentials,
+  transcript,
+  history = [],
+  streamContext = {},
+) {
   const settings = await loadSettings();
   const realtimeSettings = resolveRealtimeSettings(settings);
   const instructions = buildMobileVoiceInstructions(settings);
@@ -1781,7 +2110,11 @@ async function runMobileVoiceTextResponse(credentials, transcript, history = [])
     voice: realtimeSettings.voice,
     speed: realtimeSettings.speed,
   });
-  const session = createMobileRealtimeSession(clientSecret);
+  const session = createMobileRealtimeSession(
+    clientSecret,
+    createMobileVoiceRealtimeListeners(streamContext),
+  );
+  registerMobileVoiceStream(streamContext, session);
   try {
     await session.connect();
     await session.update({
@@ -1815,7 +2148,7 @@ async function runMobileVoiceTextResponse(credentials, transcript, history = [])
       }
       const realtimeInputs = [];
       for (const call of calls) {
-        const result = await executeMobileAssistantTool(call);
+        const result = await executeMobileAssistantToolForVoice(call, streamContext);
         await sendMobileToolOutput(session, call, result);
         if (isRecord(result?.realtimeInput)) {
           realtimeInputs.push(result.realtimeInput);
@@ -1829,11 +2162,12 @@ async function runMobileVoiceTextResponse(credentials, transcript, history = [])
       audio: null,
     };
   } finally {
+    unregisterMobileVoiceStream(streamContext.turnId, session);
     session.close();
   }
 }
 
-function createMobileRealtimeSession(clientSecret) {
+function createMobileRealtimeSession(clientSecret, listeners = {}) {
   const socket = new WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(realtimeDefaults.model)}`,
     {
@@ -1878,17 +2212,25 @@ function createMobileRealtimeSession(clientSecret) {
       if (pending) {
         pending.responseId = responseId;
       }
+      listeners.onResponseCreated?.({ responseId });
       return;
     }
     if (event?.type === "response.output_audio.delta" && typeof event.delta === "string") {
       getPendingMobileRealtimeResponse(responseId)?.audioChunks.push(event.delta);
+      listeners.onAudioDelta?.({ responseId, delta: event.delta });
       return;
     }
     if (
-      event?.type === "response.output_audio_transcript.delta" &&
+      (event?.type === "response.output_audio_transcript.delta" ||
+        event?.type === "response.output_text.delta") &&
       typeof event.delta === "string"
     ) {
       getPendingMobileRealtimeResponse(responseId)?.transcriptChunks.push(event.delta);
+      listeners.onTextDelta?.({ responseId, delta: event.delta });
+      return;
+    }
+    if (event?.type === "response.output_item.done" && event.item?.type === "function_call") {
+      listeners.onToolCall?.({ call: event.item });
       return;
     }
     if (event?.type === "conversation.item.input_audio_transcription.completed") {
@@ -1900,17 +2242,27 @@ function createMobileRealtimeSession(clientSecret) {
         } else {
           pendingInputTranscripts.push(transcript);
         }
+        listeners.onInputTranscript?.({ transcript });
       }
       return;
     }
     if (event?.type === "response.done") {
       const pending = pendingResponses.shift();
-      pending?.resolve({
-        response: event.response,
-        audioChunks: pending.audioChunks,
-        transcriptChunks: pending.transcriptChunks,
-        inputTranscripts: pending.inputTranscripts,
-      });
+      const responseResult = pending
+        ? {
+            response: event.response,
+            audioChunks: pending.audioChunks,
+            transcriptChunks: pending.transcriptChunks,
+            inputTranscripts: pending.inputTranscripts,
+          }
+        : {
+            response: event.response,
+            audioChunks: [],
+            transcriptChunks: [],
+            inputTranscripts: [],
+          };
+      listeners.onDone?.(responseResult);
+      pending?.resolve(responseResult);
       return;
     }
     if (event?.type === "error") {
@@ -1918,6 +2270,7 @@ function createMobileRealtimeSession(clientSecret) {
       if (event.error?.code) {
         error.code = event.error.code;
       }
+      listeners.onError?.(error);
       rejectPendingMobileRealtime(error);
     }
   }
@@ -2013,6 +2366,9 @@ function createMobileRealtimeSession(clientSecret) {
     sendEvent(event) {
       sendEvent(event);
     },
+    cancelResponse() {
+      sendEvent({ type: "response.cancel" });
+    },
     close() {
       socket.close();
     },
@@ -2031,6 +2387,24 @@ async function executeMobileAssistantTool(call) {
     return { status: "invalid_arguments", message: "Tool arguments were not valid JSON." };
   }
   return executeToolRequest(toolName, args);
+}
+
+async function executeMobileAssistantToolForVoice(call, streamContext) {
+  const toolName = typeof call.name === "string" ? call.name : "";
+  if (toolName) {
+    sendMobileVoiceStreamEvent(streamContext, "voice.reply.tool", {
+      status: "start",
+      name: toolName,
+    });
+  }
+  const result = await executeMobileAssistantTool(call);
+  if (toolName) {
+    sendMobileVoiceStreamEvent(streamContext, "voice.reply.tool", {
+      status: "end",
+      name: toolName,
+    });
+  }
+  return result;
 }
 
 function sendMobileToolOutput(session, call, result) {

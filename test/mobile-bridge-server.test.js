@@ -28,13 +28,80 @@ async function withBridge(callback) {
         calls.push({ type: "assistant", message, history });
         return { reply: `Echo: ${message}` };
       },
-      sendVoiceTurn: async (audio, history) => {
-        calls.push({ type: "voice", audio, history });
+      sendVoiceTurn: async (audio, history, context) => {
+        calls.push({
+          type: "voice",
+          audio,
+          history,
+          context: {
+            deviceId: context?.device?.id,
+            requestId: context?.requestId,
+            isOpen: context?.isOpen?.(),
+          },
+        });
+        context?.sendEvent?.("voice.reply.delta", context.requestId, {
+          turnId: "turn-1",
+          delta: "Voice ",
+        });
         return {
+          turnId: "turn-1",
           transcript: "hello",
           reply: "Voice echo",
           audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
         };
+      },
+      startVoiceStream: async (turnId, audio, history, context) => {
+        calls.push({
+          type: "voice.stream.start",
+          turnId,
+          audio,
+          history,
+          context: {
+            deviceId: context?.device?.id,
+            requestId: context?.requestId,
+            isOpen: context?.isOpen?.(),
+          },
+        });
+        return { turnId, started: true };
+      },
+      appendVoiceStreamAudio: async (turnId, chunk, sequence, context) => {
+        calls.push({
+          type: "voice.stream.audio",
+          turnId,
+          chunk,
+          sequence,
+          deviceId: context?.device?.id,
+          isOpen: context?.isOpen?.(),
+        });
+        return { turnId, sequence, received: true };
+      },
+      endVoiceStream: async (turnId, context) => {
+        calls.push({
+          type: "voice.stream.end",
+          turnId,
+          deviceId: context?.device?.id,
+          requestId: context?.requestId,
+          isOpen: context?.isOpen?.(),
+        });
+        context?.sendEvent?.("voice.reply.delta", context.requestId, {
+          turnId,
+          delta: "Live ",
+        });
+        return {
+          turnId,
+          transcript: "live hello",
+          reply: "Live echo",
+          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
+        };
+      },
+      cancelVoiceStream: async (turnId, context) => {
+        calls.push({
+          type: "voice.cancel",
+          turnId,
+          deviceId: context?.device?.id,
+          isOpen: context?.isOpen?.(),
+        });
+        return { turnId, cancelled: true };
       },
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -62,6 +129,40 @@ async function sendBridgeMessage(client, message) {
   client.send(JSON.stringify(message));
   const [data] = await once(client, "message");
   return JSON.parse(data.toString("utf8"));
+}
+
+function readMessagesUntil(client, predicate, limit = 5) {
+  const messages = [];
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for message. Received: ${JSON.stringify(messages)}`));
+    }, 1000);
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      client.off("message", handleMessage);
+      client.off("error", handleError);
+    };
+    const handleMessage = (data) => {
+      const message = JSON.parse(data.toString("utf8"));
+      messages.push(message);
+      if (predicate(message, messages)) {
+        cleanup();
+        resolve(messages);
+        return;
+      }
+      if (messages.length >= limit) {
+        cleanup();
+        reject(new Error(`Expected bridge message was not received: ${JSON.stringify(messages)}`));
+      }
+    };
+    const handleError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    client.on("message", handleMessage);
+    client.on("error", handleError);
+  });
 }
 
 function once(emitter, event) {
@@ -270,7 +371,192 @@ test("authenticated assistant.message routes prompt and returns reply", async ()
   });
 });
 
-test("authenticated voice.turn routes audio and returns assistant audio", async () => {
+test("authenticated voice.turn can stream deltas before final assistant audio", async () => {
+  await withBridge(async ({ bridge, calls }) => {
+    const session = createPairingSession();
+    const client = await connectClient(bridge);
+    try {
+      const pair = await sendBridgeMessage(client, {
+        type: "pair.request",
+        requestId: "pair-1",
+        pairingCode: session.code,
+        deviceName: "Android",
+      });
+      await sendBridgeMessage(client, {
+        type: "auth",
+        requestId: "auth-1",
+        deviceId: pair.payload.device.id,
+        deviceToken: pair.payload.deviceToken,
+      });
+      const messagesPromise = readMessagesUntil(
+        client,
+        (message) => message.type === "voice.reply",
+      );
+      client.send(
+        JSON.stringify({
+          type: "voice.turn",
+          requestId: "voice-1",
+          audio: {
+            chunks: ["AAAA", "AQID"],
+            sampleRate: 24000,
+            channels: 1,
+            encoding: "pcm16",
+          },
+          history: [{ role: "assistant", text: "ready" }],
+        }),
+      );
+      const [delta, response] = await messagesPromise;
+
+      assert.deepEqual(calls, [
+        {
+          type: "voice",
+          audio: {
+            chunks: ["AAAA", "AQID"],
+            sampleRate: 24000,
+            channels: 1,
+            encoding: "pcm16",
+            mimeType: null,
+          },
+          history: [{ role: "assistant", text: "ready" }],
+          context: {
+            deviceId: pair.payload.device.id,
+            requestId: "voice-1",
+            isOpen: true,
+          },
+        },
+      ]);
+      assert.deepEqual(delta, {
+        type: "voice.reply.delta",
+        requestId: "voice-1",
+        ok: true,
+        payload: { turnId: "turn-1", delta: "Voice " },
+      });
+      assert.deepEqual(response, {
+        type: "voice.reply",
+        requestId: "voice-1",
+        ok: true,
+        payload: {
+          turnId: "turn-1",
+          transcript: "hello",
+          reply: "Voice echo",
+          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
+        },
+      });
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test("authenticated live voice stream routes chunks and final reply", async () => {
+  await withBridge(async ({ bridge, calls }) => {
+    const session = createPairingSession();
+    const client = await connectClient(bridge);
+    try {
+      const pair = await sendBridgeMessage(client, {
+        type: "pair.request",
+        requestId: "pair-1",
+        pairingCode: session.code,
+        deviceName: "Android",
+      });
+      await sendBridgeMessage(client, {
+        type: "auth",
+        requestId: "auth-1",
+        deviceId: pair.payload.device.id,
+        deviceToken: pair.payload.deviceToken,
+      });
+
+      const start = await sendBridgeMessage(client, {
+        type: "voice.stream.start",
+        requestId: "stream-start-1",
+        turnId: "turn-live-1",
+        audio: { sampleRate: 24000, channels: 1, encoding: "pcm16" },
+        history: [{ role: "user", text: "before" }],
+      });
+      const audioAck = await sendBridgeMessage(client, {
+        type: "voice.stream.audio",
+        requestId: "stream-audio-1",
+        turnId: "turn-live-1",
+        chunk: "AAAA",
+        sequence: 0,
+      });
+      const messagesPromise = readMessagesUntil(
+        client,
+        (message) => message.type === "voice.reply",
+      );
+      client.send(
+        JSON.stringify({
+          type: "voice.stream.end",
+          requestId: "stream-end-1",
+          turnId: "turn-live-1",
+        }),
+      );
+      const [delta, response] = await messagesPromise;
+
+      assert.deepEqual(calls, [
+        {
+          type: "voice.stream.start",
+          turnId: "turn-live-1",
+          audio: { sampleRate: 24000, channels: 1, encoding: "pcm16", mimeType: null },
+          history: [{ role: "user", text: "before" }],
+          context: {
+            deviceId: pair.payload.device.id,
+            requestId: "stream-start-1",
+            isOpen: true,
+          },
+        },
+        {
+          type: "voice.stream.audio",
+          turnId: "turn-live-1",
+          chunk: "AAAA",
+          sequence: 0,
+          deviceId: pair.payload.device.id,
+          isOpen: true,
+        },
+        {
+          type: "voice.stream.end",
+          turnId: "turn-live-1",
+          deviceId: pair.payload.device.id,
+          requestId: "stream-end-1",
+          isOpen: true,
+        },
+      ]);
+      assert.deepEqual(start, {
+        type: "voice.stream.started",
+        requestId: "stream-start-1",
+        ok: true,
+        payload: { turnId: "turn-live-1", started: true },
+      });
+      assert.deepEqual(audioAck, {
+        type: "voice.stream.audio.ack",
+        requestId: "stream-audio-1",
+        ok: true,
+        payload: { turnId: "turn-live-1", sequence: 0, received: true },
+      });
+      assert.deepEqual(delta, {
+        type: "voice.reply.delta",
+        requestId: "stream-end-1",
+        ok: true,
+        payload: { turnId: "turn-live-1", delta: "Live " },
+      });
+      assert.deepEqual(response, {
+        type: "voice.reply",
+        requestId: "stream-end-1",
+        ok: true,
+        payload: {
+          turnId: "turn-live-1",
+          transcript: "live hello",
+          reply: "Live echo",
+          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
+        },
+      });
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test("authenticated voice.stream.cancel routes turn id", async () => {
   await withBridge(async ({ bridge, calls }) => {
     const session = createPairingSession();
     const client = await connectClient(bridge);
@@ -288,39 +574,24 @@ test("authenticated voice.turn routes audio and returns assistant audio", async 
         deviceToken: pair.payload.deviceToken,
       });
       const response = await sendBridgeMessage(client, {
-        type: "voice.turn",
-        requestId: "voice-1",
-        audio: {
-          chunks: ["AAAA", "AQID"],
-          sampleRate: 24000,
-          channels: 1,
-          encoding: "pcm16",
-        },
-        history: [{ role: "assistant", text: "ready" }],
+        type: "voice.stream.cancel",
+        requestId: "cancel-1",
+        turnId: "turn-1",
       });
 
       assert.deepEqual(calls, [
         {
-          type: "voice",
-          audio: {
-            chunks: ["AAAA", "AQID"],
-            sampleRate: 24000,
-            channels: 1,
-            encoding: "pcm16",
-            mimeType: null,
-          },
-          history: [{ role: "assistant", text: "ready" }],
+          type: "voice.cancel",
+          turnId: "turn-1",
+          deviceId: pair.payload.device.id,
+          isOpen: true,
         },
       ]);
       assert.deepEqual(response, {
-        type: "voice.reply",
-        requestId: "voice-1",
+        type: "voice.stream.cancelled",
+        requestId: "cancel-1",
         ok: true,
-        payload: {
-          transcript: "hello",
-          reply: "Voice echo",
-          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
-        },
+        payload: { turnId: "turn-1", cancelled: true },
       });
     } finally {
       client.close();
