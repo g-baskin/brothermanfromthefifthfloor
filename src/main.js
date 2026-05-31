@@ -102,6 +102,12 @@ const mobileAssistantDefaults = Object.freeze({
   maxToolRounds: 5,
 });
 
+const mobileVoiceDefaults = Object.freeze({
+  outputSampleRate: realtimeDefaults.sampleRate,
+  outputChannels: 1,
+  maxToolRounds: 5,
+});
+
 const jarvisStyleInstructions = `# Voice Preset
 - Use an original elite AI-butler/copilot style: calm, refined, precise, technically capable, and lightly dry.
 - Aim for a low-drama, polished, cinematic command-center feel without impersonating any real actor or copyrighted character.
@@ -567,6 +573,90 @@ async function handleMobileAssistantMessage(message, history = []) {
   }
 }
 
+async function handleMobileVoiceTurn(audio, history = []) {
+  const normalizedAudio = normalizeMobileVoiceAudio(audio);
+  const credentials = await getFreshOpenAICredentials();
+  if (!credentials) {
+    throw new Error("Connect OpenAI on desktop before using mobile voice.");
+  }
+  const startedAt = Date.now();
+  await writeDiagnosticLog("mobile.voice.start", {
+    sampleRate: normalizedAudio.sampleRate,
+    channels: normalizedAudio.channels,
+    encoding: normalizedAudio.encoding,
+    chunks: normalizedAudio.chunks.length,
+    bytes: normalizedAudio.byteLength,
+  });
+  try {
+    const result = await runMobileVoiceResponse(credentials, normalizedAudio, history);
+    if (result.transcript) {
+      void recordAssistantChatTurn({
+        role: "user",
+        content: result.transcript,
+        source: "mobile_voice",
+      });
+    }
+    if (result.reply) {
+      void recordAssistantChatTurn({
+        role: "assistant",
+        content: result.reply,
+        source: "mobile_voice",
+      });
+    }
+    await writeDiagnosticLog("mobile.voice.finish", {
+      elapsedMs: Date.now() - startedAt,
+      transcript: result.transcript.slice(0, 500),
+      reply: result.reply.slice(0, 500),
+      audioBytes: result.audio?.byteLength ?? 0,
+    });
+    return result;
+  } catch (error) {
+    await writeDiagnosticLog("mobile.voice.error", {
+      elapsedMs: Date.now() - startedAt,
+      error: formatDiagnosticError(error),
+    });
+    throw error;
+  }
+}
+
+function normalizeMobileVoiceAudio(audio) {
+  if (!isRecord(audio) || !Array.isArray(audio.chunks) || audio.chunks.length === 0) {
+    throw new Error("Voice audio is required.");
+  }
+  const sampleRate = Number(audio.sampleRate);
+  const channels = Number(audio.channels);
+  const encoding = typeof audio.encoding === "string" ? audio.encoding.trim().toLowerCase() : "";
+  if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000) {
+    throw new Error("Voice audio sample rate is invalid.");
+  }
+  if (!Number.isInteger(channels) || channels < 1 || channels > 2) {
+    throw new Error("Voice audio channel count is invalid.");
+  }
+  if (encoding !== "pcm16" && encoding !== "aac_m4a") {
+    throw new Error("Voice audio encoding must be pcm16 or aac_m4a.");
+  }
+  const chunks = [];
+  let byteLength = 0;
+  for (const chunk of audio.chunks) {
+    const buffer = Buffer.from(String(chunk), "base64");
+    byteLength += buffer.length;
+    if (buffer.length > 0) {
+      chunks.push(buffer.toString("base64"));
+    }
+  }
+  if (byteLength < 480 || chunks.length === 0) {
+    throw new Error("Voice audio is too short.");
+  }
+  return {
+    chunks,
+    sampleRate,
+    channels,
+    encoding,
+    mimeType: typeof audio.mimeType === "string" ? audio.mimeType : "",
+    byteLength,
+  };
+}
+
 async function executeToolRequest(name, args = {}) {
   if (typeof name !== "string" || !name.trim()) {
     return {
@@ -731,6 +821,7 @@ async function startMobileBridge(host = "127.0.0.1") {
       getRealtimeTools: getRealtimeToolDefinitions,
       executeRealtimeTool: executeToolRequest,
       sendAssistantMessage: handleMobileAssistantMessage,
+      sendVoiceTurn: handleMobileVoiceTurn,
     },
     logger: {
       info: (message, details) => safeConsole("info", message, details),
@@ -1555,26 +1646,188 @@ async function runMobileAssistantResponse(credentials, message, history = []) {
     ];
 
     for (let round = 0; round < mobileAssistantDefaults.maxToolRounds; round += 1) {
-      const response = await session.createTextResponse(input);
-      const calls = getRealtimeFunctionCalls(response);
+      const responseResult = await session.createTextResponse(input);
+      const calls = getRealtimeFunctionCalls(responseResult.response);
       if (calls.length === 0) {
-        return extractRealtimeResponseText(response) || "Done.";
+        return extractRealtimeResponseText(responseResult.response) || "Done.";
       }
+      const realtimeInputs = [];
       for (const call of calls) {
         const result = await executeMobileAssistantTool(call);
-        await session.sendEvent({
-          type: "conversation.item.create",
-          item: {
-            type: "function_call_output",
-            call_id: call.call_id,
-            output: JSON.stringify(result),
-          },
-        });
+        await sendMobileToolOutput(session, call, result);
+        if (isRecord(result?.realtimeInput)) {
+          realtimeInputs.push(result.realtimeInput);
+        }
       }
-      input.length = 0;
+      input.splice(0, input.length, ...realtimeInputs);
     }
 
     return "I ran several tool steps, but need you to narrow that down before I continue.";
+  } finally {
+    session.close();
+  }
+}
+
+async function runMobileVoiceResponse(credentials, audio, history = []) {
+  if (audio.encoding === "aac_m4a") {
+    const transcript = await transcribeMobileVoiceRecording(credentials, audio);
+    if (!transcript) {
+      throw new Error("I couldn't hear enough speech in that recording.");
+    }
+    return runMobileVoiceTextResponse(credentials, transcript, history);
+  }
+  return runMobileRealtimePcmVoiceResponse(credentials, audio, history);
+}
+
+async function runMobileRealtimePcmVoiceResponse(credentials, audio, history = []) {
+  const settings = await loadSettings();
+  const realtimeSettings = resolveRealtimeSettings(settings);
+  const instructions = buildMobileVoiceInstructions(settings);
+  const clientSecret = await createRealtimeClientSecret(credentials, {
+    instructions,
+    voice: realtimeSettings.voice,
+    speed: realtimeSettings.speed,
+  });
+  const session = createMobileRealtimeSession(clientSecret);
+  try {
+    await session.connect();
+    await session.update({
+      instructions,
+      tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
+      tool_choice: "auto",
+      output_modalities: ["audio"],
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: audio.sampleRate },
+          noise_reduction: { type: "near_field" },
+          transcription: { model: "gpt-4o-transcribe" },
+          turn_detection: null,
+        },
+        output: {
+          format: { type: "audio/pcm", rate: mobileVoiceDefaults.outputSampleRate },
+          voice: realtimeSettings.voice,
+          speed: realtimeSettings.speed,
+        },
+      },
+    });
+
+    for (const item of normalizeMobileAssistantHistory(history)) {
+      session.sendEvent({ type: "conversation.item.create", item });
+    }
+    for (const chunk of audio.chunks) {
+      session.sendEvent({ type: "input_audio_buffer.append", audio: chunk });
+    }
+    session.sendEvent({ type: "input_audio_buffer.commit" });
+
+    let responseResult = await session.createResponse({ output_modalities: ["audio"] });
+    for (let round = 0; round < mobileVoiceDefaults.maxToolRounds; round += 1) {
+      const calls = getRealtimeFunctionCalls(responseResult.response);
+      if (calls.length === 0) {
+        return createMobileVoiceTurnResult(responseResult);
+      }
+
+      const realtimeInputs = [];
+      for (const call of calls) {
+        const result = await executeMobileAssistantTool(call);
+        await sendMobileToolOutput(session, call, result);
+        if (isRecord(result?.realtimeInput)) {
+          realtimeInputs.push(result.realtimeInput);
+        }
+      }
+      responseResult = await session.createResponse({
+        output_modalities: ["audio"],
+        ...(realtimeInputs.length > 0
+          ? {
+              input: realtimeInputs,
+              instructions:
+                "Use the attached screenshot image to answer Greg's mobile voice request directly.",
+            }
+          : {}),
+      });
+    }
+
+    return {
+      transcript: responseResult.inputTranscripts.join("\n").trim(),
+      reply: "I ran several tool steps, but need you to narrow that down before I continue.",
+      audio: null,
+    };
+  } finally {
+    session.close();
+  }
+}
+
+async function transcribeMobileVoiceRecording(credentials, audio) {
+  const bytes = Buffer.concat(audio.chunks.map((chunk) => Buffer.from(chunk, "base64")));
+  const form = new FormData();
+  form.set("model", "gpt-4o-transcribe");
+  form.set("file", new Blob([bytes], { type: audio.mimeType || "audio/mp4" }), "brah-mobile.m4a");
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${credentials.accessToken}`,
+    },
+    body: form,
+  });
+  const result = await parseJsonResponse(response, "Mobile voice transcription");
+  return typeof result.text === "string" ? result.text.trim() : "";
+}
+
+async function runMobileVoiceTextResponse(credentials, transcript, history = []) {
+  const settings = await loadSettings();
+  const realtimeSettings = resolveRealtimeSettings(settings);
+  const instructions = buildMobileVoiceInstructions(settings);
+  const clientSecret = await createRealtimeClientSecret(credentials, {
+    instructions,
+    voice: realtimeSettings.voice,
+    speed: realtimeSettings.speed,
+  });
+  const session = createMobileRealtimeSession(clientSecret);
+  try {
+    await session.connect();
+    await session.update({
+      instructions,
+      tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
+      tool_choice: "auto",
+      output_modalities: ["audio"],
+      audio: {
+        output: {
+          format: { type: "audio/pcm", rate: mobileVoiceDefaults.outputSampleRate },
+          voice: realtimeSettings.voice,
+          speed: realtimeSettings.speed,
+        },
+      },
+    });
+    const input = [
+      ...normalizeMobileAssistantHistory(history),
+      createMobileAssistantUserMessage(transcript),
+    ];
+    for (let round = 0; round < mobileVoiceDefaults.maxToolRounds; round += 1) {
+      for (const item of input) {
+        session.sendEvent({ type: "conversation.item.create", item });
+      }
+      const responseResult = await session.createResponse({ output_modalities: ["audio"] });
+      const calls = getRealtimeFunctionCalls(responseResult.response);
+      if (calls.length === 0) {
+        return {
+          ...createMobileVoiceTurnResult(responseResult),
+          transcript,
+        };
+      }
+      const realtimeInputs = [];
+      for (const call of calls) {
+        const result = await executeMobileAssistantTool(call);
+        await sendMobileToolOutput(session, call, result);
+        if (isRecord(result?.realtimeInput)) {
+          realtimeInputs.push(result.realtimeInput);
+        }
+      }
+      input.splice(0, input.length, ...realtimeInputs);
+    }
+    return {
+      transcript,
+      reply: "I ran several tool steps, but need you to narrow that down before I continue.",
+      audio: null,
+    };
   } finally {
     session.close();
   }
@@ -1591,6 +1844,7 @@ function createMobileRealtimeSession(clientSecret) {
     },
   );
   const pendingResponses = [];
+  const pendingInputTranscripts = [];
   let pendingSessionUpdate = null;
   let connected = false;
   let closed = false;
@@ -1618,9 +1872,45 @@ function createMobileRealtimeSession(clientSecret) {
       pendingSessionUpdate = null;
       return;
     }
+    const responseId = event?.response_id ?? event?.response?.id;
+    if (event?.type === "response.created" && responseId) {
+      const pending = getPendingMobileRealtimeResponse();
+      if (pending) {
+        pending.responseId = responseId;
+      }
+      return;
+    }
+    if (event?.type === "response.output_audio.delta" && typeof event.delta === "string") {
+      getPendingMobileRealtimeResponse(responseId)?.audioChunks.push(event.delta);
+      return;
+    }
+    if (
+      event?.type === "response.output_audio_transcript.delta" &&
+      typeof event.delta === "string"
+    ) {
+      getPendingMobileRealtimeResponse(responseId)?.transcriptChunks.push(event.delta);
+      return;
+    }
+    if (event?.type === "conversation.item.input_audio_transcription.completed") {
+      const transcript = typeof event.transcript === "string" ? event.transcript.trim() : "";
+      if (transcript) {
+        const pending = getPendingMobileRealtimeResponse();
+        if (pending) {
+          pending.inputTranscripts.push(transcript);
+        } else {
+          pendingInputTranscripts.push(transcript);
+        }
+      }
+      return;
+    }
     if (event?.type === "response.done") {
       const pending = pendingResponses.shift();
-      pending?.resolve(event.response);
+      pending?.resolve({
+        response: event.response,
+        audioChunks: pending.audioChunks,
+        transcriptChunks: pending.transcriptChunks,
+        inputTranscripts: pending.inputTranscripts,
+      });
       return;
     }
     if (event?.type === "error") {
@@ -1630,6 +1920,18 @@ function createMobileRealtimeSession(clientSecret) {
       }
       rejectPendingMobileRealtime(error);
     }
+  }
+
+  function getPendingMobileRealtimeResponse(responseId) {
+    if (pendingResponses.length === 0) {
+      return null;
+    }
+    if (!responseId) {
+      return pendingResponses[pendingResponses.length - 1];
+    }
+    return (
+      pendingResponses.find((pending) => pending.responseId === responseId) ?? pendingResponses[0]
+    );
   }
 
   function rejectPendingMobileRealtime(error) {
@@ -1689,13 +1991,22 @@ function createMobileRealtimeSession(clientSecret) {
       for (const item of input) {
         sendEvent({ type: "conversation.item.create", item });
       }
+      return this.createResponse({ output_modalities: ["text"] });
+    },
+    createResponse(response = {}) {
       return new Promise((resolve, reject) => {
-        pendingResponses.push({ resolve, reject });
+        const pending = {
+          resolve,
+          reject,
+          responseId: null,
+          audioChunks: [],
+          transcriptChunks: [],
+          inputTranscripts: pendingInputTranscripts.splice(0),
+        };
+        pendingResponses.push(pending);
         sendEvent({
           type: "response.create",
-          response: {
-            output_modalities: ["text"],
-          },
+          response,
         });
       });
     },
@@ -1722,12 +2033,99 @@ async function executeMobileAssistantTool(call) {
   return executeToolRequest(toolName, args);
 }
 
+function sendMobileToolOutput(session, call, result) {
+  const safeResult = stripRealtimeInputFromToolResult(result);
+  return session.sendEvent({
+    type: "conversation.item.create",
+    item: {
+      type: "function_call_output",
+      call_id: call.call_id,
+      output: JSON.stringify(safeResult),
+    },
+  });
+}
+
+function stripRealtimeInputFromToolResult(result) {
+  if (!isRecord(result) || !isRecord(result.realtimeInput)) {
+    return result;
+  }
+  const { realtimeInput: _realtimeInput, ...safeResult } = result;
+  return {
+    ...safeResult,
+    message:
+      "Screenshot captured and attached to the Realtime response. Use the attached image to answer Greg directly.",
+  };
+}
+
+function createMobileVoiceTurnResult(responseResult) {
+  const reply =
+    responseResult.transcriptChunks.join("").trim() ||
+    extractRealtimeResponseText(responseResult.response) ||
+    "Done.";
+  return {
+    transcript: responseResult.inputTranscripts.join("\n").trim(),
+    reply,
+    audio: createMobileVoiceAudioPayload(responseResult.audioChunks),
+  };
+}
+
+function createMobileVoiceAudioPayload(chunks) {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return null;
+  }
+  const pcm = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk, "base64")));
+  if (pcm.length === 0) {
+    return null;
+  }
+  const wav = encodePcm16Wav(pcm, {
+    sampleRate: mobileVoiceDefaults.outputSampleRate,
+    channels: mobileVoiceDefaults.outputChannels,
+  });
+  return {
+    base64: wav.toString("base64"),
+    mimeType: "audio/wav",
+    format: "wav",
+    sampleRate: mobileVoiceDefaults.outputSampleRate,
+    channels: mobileVoiceDefaults.outputChannels,
+    byteLength: wav.length,
+  };
+}
+
+function encodePcm16Wav(pcm, { sampleRate, channels }) {
+  const byteRate = sampleRate * channels * 2;
+  const blockAlign = channels * 2;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
 function buildMobileAssistantInstructions(message = "", settings = defaultSettings) {
   return buildRealtimeInstructions({
     memoryContext: buildMemoryContextFromSettings(settings, message),
     profile: loadAgentProfile(),
     voiceStyle:
       "You are being used from Greg's phone in text chat. Reply in concise mobile-friendly text. Use tools when useful. Do not call end_call.",
+  });
+}
+
+function buildMobileVoiceInstructions(settings = defaultSettings) {
+  return buildRealtimeInstructions({
+    memoryContext: buildMemoryContextFromSettings(settings),
+    profile: loadAgentProfile(),
+    voiceStyle:
+      "You are being used from Greg's Android phone in push-to-talk voice mode. Reply with concise spoken audio. Use the same desktop tools, memory, planner, web, screen, and computer access when useful. Do not call end_call; the phone controls each turn.",
   });
 }
 
@@ -1815,26 +2213,35 @@ function buildRealtimeSessionConfig(options) {
     typeof options.instructions === "string" && options.instructions.trim()
       ? options.instructions.trim()
       : buildRealtimeInstructions({ memoryContext: buildMemoryContext() });
+  const inputAudioOptions = isRecord(options.audio?.input) ? options.audio.input : {};
+  const outputAudioOptions = isRecord(options.audio?.output) ? options.audio.output : {};
 
   return {
     type: "realtime",
     model,
     instructions,
-    output_modalities: ["audio"],
+    output_modalities: Array.isArray(options.output_modalities)
+      ? options.output_modalities
+      : ["audio"],
     audio: {
       input: {
-        format: { type: "audio/pcm", rate: realtimeDefaults.sampleRate },
-        noise_reduction: { type: "near_field" },
-        transcription: { model: "gpt-4o-transcribe" },
-        turn_detection: {
-          type: "semantic_vad",
-          eagerness: "high",
-          create_response: true,
-          interrupt_response: true,
-        },
+        format: normalizeRealtimeAudioFormat(inputAudioOptions.format, realtimeDefaults.sampleRate),
+        noise_reduction: inputAudioOptions.noise_reduction ?? { type: "near_field" },
+        transcription: inputAudioOptions.transcription ?? { model: "gpt-4o-transcribe" },
+        turn_detection: Object.hasOwn(inputAudioOptions, "turn_detection")
+          ? inputAudioOptions.turn_detection
+          : {
+              type: "semantic_vad",
+              eagerness: "high",
+              create_response: true,
+              interrupt_response: true,
+            },
       },
       output: {
-        format: { type: "audio/pcm", rate: realtimeDefaults.sampleRate },
+        format: normalizeRealtimeAudioFormat(
+          outputAudioOptions.format,
+          realtimeDefaults.sampleRate,
+        ),
         voice,
         speed,
       },
@@ -1844,6 +2251,16 @@ function buildRealtimeSessionConfig(options) {
     tools: getRealtimeToolDefinitions(),
     tool_choice: "auto",
     tracing: "auto",
+  };
+}
+
+function normalizeRealtimeAudioFormat(value, fallbackRate) {
+  const rate = Number(value?.rate);
+  return {
+    type: value?.type === "audio/pcmu" ? "audio/pcmu" : "audio/pcm",
+    ...(Number.isInteger(rate) && rate >= 8000 && rate <= 48000
+      ? { rate }
+      : { rate: fallbackRate }),
   };
 }
 

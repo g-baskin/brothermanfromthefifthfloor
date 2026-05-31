@@ -1,4 +1,12 @@
+import {
+  createAudioPlayer,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+} from "expo-audio";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import { File, Paths } from "expo-file-system";
 import * as Linking from "expo-linking";
 import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -19,7 +27,11 @@ const CLIENT_ID_KEY = "brah.mobile.clientId.v1";
 const DEFAULT_PORT = "19455";
 const REQUEST_TIMEOUT_MS = 8000;
 const ASSISTANT_TIMEOUT_MS = 180000;
-const APP_BUILD_LABEL = "pairing-client-id-v2";
+const VOICE_TIMEOUT_MS = 180000;
+const VOICE_SAMPLE_RATE = 44100;
+const VOICE_CHANNELS = 1;
+const MIN_VOICE_DURATION_MS = 350;
+const APP_BUILD_LABEL = "mobile-voice-v1";
 
 export default function App() {
   const socketRef = useRef(null);
@@ -46,9 +58,24 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
   const chatMessagesRef = useRef([]);
+  const voiceStartedAtRef = useRef(0);
+  const voicePlayerRef = useRef(null);
+  const [recordingVoice, setRecordingVoice] = useState(false);
+  const [voiceReady, setVoiceReady] = useState(false);
+  const [voiceSummary, setVoiceSummary] = useState("");
   const [scanning, setScanning] = useState(false);
   const [pendingAutoPair, setPendingAutoPair] = useState(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const audioRecorder = useAudioRecorder({
+    ...RecordingPresets.HIGH_QUALITY,
+    sampleRate: VOICE_SAMPLE_RATE,
+    numberOfChannels: VOICE_CHANNELS,
+    bitRate: 96000,
+    android: {
+      outputFormat: "mpeg4",
+      audioEncoder: "aac",
+    },
+  });
 
   const bridgeUrl = useMemo(() => {
     const cleanHost = host.trim();
@@ -73,6 +100,16 @@ export default function App() {
   useEffect(() => {
     chatMessagesRef.current = chatMessages;
   }, [chatMessages]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        audioRecorder.stop();
+      } catch {}
+      voicePlayerRef.current?.remove?.();
+      voicePlayerRef.current = null;
+    };
+  }, [audioRecorder]);
 
   useEffect(() => {
     ensureClientId()
@@ -375,6 +412,122 @@ export default function App() {
     }
   }, [authenticate, authenticated, sendBridgeRequest, toolArgs, toolName]);
 
+  const startVoiceTurn = useCallback(async () => {
+    if (busy || recordingVoice) {
+      return;
+    }
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Microphone needed", "Allow microphone access to talk to desktop Brah.");
+        return;
+      }
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        interruptionMode: "doNotMix",
+      });
+      voicePlayerRef.current?.pause?.();
+      voiceStartedAtRef.current = Date.now();
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setRecordingVoice(true);
+      setVoiceReady(false);
+      setVoiceSummary("Listening… tap again or press Stop when finished.");
+      setStatusText("Listening from Android mic…");
+    } catch (error) {
+      setRecordingVoice(false);
+      setVoiceSummary(`Voice start failed: ${error.message}`);
+      Alert.alert("Voice failed", error.message);
+    }
+  }, [audioRecorder, busy, recordingVoice]);
+
+  const stopVoiceTurn = useCallback(async () => {
+    if (!recordingVoice) {
+      return;
+    }
+    try {
+      await audioRecorder.stop();
+    } catch {}
+    setRecordingVoice(false);
+
+    const durationMs = Date.now() - voiceStartedAtRef.current;
+    const uri = audioRecorder.uri;
+    if (durationMs < MIN_VOICE_DURATION_MS || !uri) {
+      setVoiceSummary("Record a little longer before sending.");
+      setStatusText("Voice turn was too short.");
+      return;
+    }
+    const recordingFile = new File(uri);
+    const base64 = await recordingFile.base64();
+
+    setBusy(true);
+    setVoiceReady(false);
+    setVoiceSummary("Sending voice to desktop Brah…");
+    setStatusText("Routing voice through desktop Realtime…");
+    try {
+      const auth = authenticated ? true : await authenticate();
+      if (!auth) return;
+      const history = chatMessagesRef.current
+        .map((item) => ({ role: item.role, text: item.text }))
+        .slice(-12);
+      const response = await sendBridgeRequest(
+        {
+          type: "voice.turn",
+          audio: {
+            base64,
+            sampleRate: VOICE_SAMPLE_RATE,
+            channels: VOICE_CHANNELS,
+            encoding: "aac_m4a",
+            mimeType: "audio/mp4",
+          },
+          history,
+        },
+        { timeoutMs: VOICE_TIMEOUT_MS },
+      );
+      ensureOk(response);
+      const transcript = cleanText(response.payload?.transcript);
+      const reply = cleanText(response.payload?.reply) || "Done.";
+      const audio = response.payload?.audio;
+      setChatMessages((messages) =>
+        [
+          ...messages,
+          transcript ? { id: createRequestId(), role: "user", text: transcript } : null,
+          { id: createRequestId(), role: "assistant", text: reply },
+        ].filter(Boolean),
+      );
+      if (audio?.base64) {
+        await playAssistantAudio(audio, voicePlayerRef);
+        setVoiceReady(true);
+      }
+      setVoiceSummary(transcript ? `You: ${transcript}\nBrah: ${reply}` : `Brah: ${reply}`);
+      setStatusText("Brah replied by voice from desktop.");
+    } catch (error) {
+      setVoiceSummary(`Voice error: ${error.message}`);
+      setChatMessages((messages) => [
+        ...messages,
+        { id: createRequestId(), role: "assistant", text: `Voice error: ${error.message}` },
+      ]);
+      setStatusText(error.message);
+      Alert.alert("Voice failed", error.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [audioRecorder, authenticate, authenticated, recordingVoice, sendBridgeRequest]);
+
+  const replayAssistantAudio = useCallback(() => {
+    const player = voicePlayerRef.current;
+    if (!player) {
+      return;
+    }
+    try {
+      player.seekTo?.(0);
+      player.play();
+    } catch (error) {
+      setVoiceSummary(`Replay failed: ${error.message}`);
+    }
+  }, []);
+
   const sendAssistantMessage = useCallback(async () => {
     const message = chatInput.trim();
     if (!message) {
@@ -556,6 +709,43 @@ export default function App() {
         </View>
 
         <View style={styles.card}>
+          <Text style={styles.cardTitle}>Voice push-to-talk</Text>
+          <Text style={styles.hint}>
+            Tap to start recording, then tap again to send. Audio routes through desktop OpenAI
+            Realtime, so memory, screen, and tool access stay on Brah desktop.
+          </Text>
+          <Pressable
+            onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
+            disabled={busy || !storedDevice}
+            style={({ pressed }) => [
+              styles.voiceButton,
+              recordingVoice && styles.voiceButtonRecording,
+              (busy || !storedDevice) && styles.buttonDisabled,
+              pressed && !busy && storedDevice && styles.buttonPressed,
+            ]}
+          >
+            <Text style={styles.voiceButtonText}>
+              {recordingVoice ? "Recording… tap to send" : "Tap to record"}
+            </Text>
+          </Pressable>
+          <View style={styles.row}>
+            <Button
+              label={recordingVoice ? "Stop & send" : "Start recording"}
+              onPress={recordingVoice ? stopVoiceTurn : startVoiceTurn}
+              disabled={busy || !storedDevice}
+              secondary={!recordingVoice}
+            />
+            <Button
+              label="Replay reply"
+              onPress={replayAssistantAudio}
+              disabled={!voiceReady}
+              secondary
+            />
+          </View>
+          {voiceSummary ? <Text style={styles.voiceSummary}>{voiceSummary}</Text> : null}
+        </View>
+
+        <View style={styles.card}>
           <Text style={styles.cardTitle}>Talk to Brah</Text>
           <Text style={styles.hint}>
             Send natural language to desktop Brah. It can answer, use memory/tasks/calendar, inspect
@@ -658,6 +848,29 @@ function ensureOk(response) {
   if (!response?.ok) {
     throw new Error(response?.error?.message || "Bridge request failed.");
   }
+}
+
+function cleanText(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+async function playAssistantAudio(audio, playerRef) {
+  if (typeof audio?.base64 !== "string" || !audio.base64) {
+    return;
+  }
+  const file = new File(Paths.cache, `brah-reply-${Date.now()}.wav`);
+  file.create({ overwrite: true });
+  file.write(audio.base64, { encoding: "base64" });
+  const previous = playerRef.current;
+  previous?.remove?.();
+  const player = createAudioPlayer({ uri: file.uri }, { keepAudioSessionActive: true });
+  playerRef.current = player;
+  await setAudioModeAsync({
+    allowsRecording: false,
+    playsInSilentMode: true,
+    interruptionMode: "doNotMix",
+  });
+  player.play();
 }
 
 function formatPairingError(message) {
@@ -925,6 +1138,36 @@ const styles = StyleSheet.create({
     padding: 12,
     fontFamily: "monospace",
     fontSize: 12,
+  },
+  voiceButton: {
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 92,
+    borderColor: "rgba(199,210,254,0.26)",
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: "rgba(109,125,245,0.28)",
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
+  voiceButtonRecording: {
+    borderColor: "rgba(248,113,113,0.5)",
+    backgroundColor: "rgba(248,113,113,0.26)",
+  },
+  voiceButtonText: {
+    color: "#fff",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+  voiceSummary: {
+    color: "rgba(235,238,246,0.76)",
+    borderColor: "rgba(255,255,255,0.1)",
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: "rgba(0,0,0,0.22)",
+    padding: 12,
+    fontSize: 14,
+    lineHeight: 20,
   },
   statusBar: {
     flexDirection: "row",

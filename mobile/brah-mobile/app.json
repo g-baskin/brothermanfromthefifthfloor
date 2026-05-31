@@ -8,13 +8,22 @@
     "scheme": "brahmobile",
     "android": {
       "package": "com.unstablemind.brahmobile",
-      "permissions": ["INTERNET", "CAMERA"]
+      "permissions": ["INTERNET", "CAMERA", "RECORD_AUDIO"]
     },
     "plugins": [
       [
         "expo-camera",
         {
           "cameraPermission": "Allow Brah Mobile to scan the desktop pairing QR code."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Brah Mobile to record push-to-talk voice for desktop Brah.",
+          "recordAudioAndroid": true,
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
         }
       ]
     ],

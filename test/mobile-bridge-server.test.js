@@ -28,6 +28,14 @@ async function withBridge(callback) {
         calls.push({ type: "assistant", message, history });
         return { reply: `Echo: ${message}` };
       },
+      sendVoiceTurn: async (audio, history) => {
+        calls.push({ type: "voice", audio, history });
+        return {
+          transcript: "hello",
+          reply: "Voice echo",
+          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
+        };
+      },
     },
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -255,6 +263,64 @@ test("authenticated assistant.message routes prompt and returns reply", async ()
         requestId: "chat-1",
         ok: true,
         payload: { reply: "Echo: What is on my task list?" },
+      });
+    } finally {
+      client.close();
+    }
+  });
+});
+
+test("authenticated voice.turn routes audio and returns assistant audio", async () => {
+  await withBridge(async ({ bridge, calls }) => {
+    const session = createPairingSession();
+    const client = await connectClient(bridge);
+    try {
+      const pair = await sendBridgeMessage(client, {
+        type: "pair.request",
+        requestId: "pair-1",
+        pairingCode: session.code,
+        deviceName: "Android",
+      });
+      await sendBridgeMessage(client, {
+        type: "auth",
+        requestId: "auth-1",
+        deviceId: pair.payload.device.id,
+        deviceToken: pair.payload.deviceToken,
+      });
+      const response = await sendBridgeMessage(client, {
+        type: "voice.turn",
+        requestId: "voice-1",
+        audio: {
+          chunks: ["AAAA", "AQID"],
+          sampleRate: 24000,
+          channels: 1,
+          encoding: "pcm16",
+        },
+        history: [{ role: "assistant", text: "ready" }],
+      });
+
+      assert.deepEqual(calls, [
+        {
+          type: "voice",
+          audio: {
+            chunks: ["AAAA", "AQID"],
+            sampleRate: 24000,
+            channels: 1,
+            encoding: "pcm16",
+            mimeType: null,
+          },
+          history: [{ role: "assistant", text: "ready" }],
+        },
+      ]);
+      assert.deepEqual(response, {
+        type: "voice.reply",
+        requestId: "voice-1",
+        ok: true,
+        payload: {
+          transcript: "hello",
+          reply: "Voice echo",
+          audio: { base64: "UklGRgAAAAA=", mimeType: "audio/wav" },
+        },
       });
     } finally {
       client.close();

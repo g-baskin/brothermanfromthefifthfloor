@@ -7,7 +7,7 @@ import {
   normalizeBridgeMessage,
 } from "../src/mobile/message-protocol.js";
 
-test("accepts valid auth, pair, assistant, and tool messages", () => {
+test("accepts valid auth, pair, assistant, voice, and tool messages", () => {
   const auth = normalizeBridgeMessage({
     type: "auth",
     deviceId: " phone-1 ",
@@ -71,6 +71,58 @@ test("accepts valid auth, pair, assistant, and tool messages", () => {
       args: { limit: 3 },
     },
   );
+
+  assert.deepEqual(
+    normalizeBridgeMessage({
+      type: "voice.turn",
+      requestId: "voice-1",
+      audio: {
+        chunks: [" AAA= ", "AQID"],
+        sampleRate: 24000,
+        channels: 1,
+        encoding: "PCM16",
+      },
+      history: [{ role: "assistant", text: "ready" }],
+    }),
+    {
+      type: "voice.turn",
+      requestId: "voice-1",
+      audio: {
+        chunks: ["AAA=", "AQID"],
+        sampleRate: 24000,
+        channels: 1,
+        encoding: "pcm16",
+        mimeType: null,
+      },
+      history: [{ role: "assistant", text: "ready" }],
+    },
+  );
+
+  assert.deepEqual(
+    normalizeBridgeMessage({
+      type: "voice.turn",
+      requestId: "voice-2",
+      audio: {
+        base64: "AQID",
+        sampleRate: 44100,
+        channels: 1,
+        encoding: "aac_m4a",
+        mimeType: " audio/mp4 ",
+      },
+    }),
+    {
+      type: "voice.turn",
+      requestId: "voice-2",
+      audio: {
+        chunks: ["AQID"],
+        sampleRate: 44100,
+        channels: 1,
+        encoding: "aac_m4a",
+        mimeType: "audio/mp4",
+      },
+      history: [],
+    },
+  );
 });
 
 test("accepts simple authenticated request types", () => {
@@ -105,6 +157,39 @@ test("rejects non-object, unknown, and bad fields", () => {
     () => normalizeBridgeMessage({ type: "tools.execute", name: "list_tasks", args: [] }),
     /args/,
   );
+  assert.throws(() => normalizeBridgeMessage({ type: "voice.turn", audio: null }), /audio/);
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.turn",
+        audio: { chunks: ["not base64?"], sampleRate: 24000, channels: 1, encoding: "pcm16" },
+      }),
+    /base64/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.turn",
+        audio: { chunks: ["AAAA"], sampleRate: 96000, channels: 1, encoding: "pcm16" },
+      }),
+    /sampleRate/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.turn",
+        audio: { chunks: ["AAAA"], sampleRate: 24000, channels: 3, encoding: "pcm16" },
+      }),
+    /channels/,
+  );
+  assert.throws(
+    () =>
+      normalizeBridgeMessage({
+        type: "voice.turn",
+        audio: { chunks: ["AAAA"], sampleRate: 24000, channels: 1, encoding: "aac" },
+      }),
+    /encoding/,
+  );
   assert.throws(
     () => normalizeBridgeMessage({ type: "openai.status.get", requestId: "x".repeat(121) }),
     /requestId/,
@@ -130,6 +215,7 @@ test("creates stable response and error envelopes", () => {
 test("identifies bridge request messages", () => {
   assert.equal(isBridgeRequestMessage({ type: "auth" }), true);
   assert.equal(isBridgeRequestMessage({ type: "assistant.message" }), true);
+  assert.equal(isBridgeRequestMessage({ type: "voice.turn" }), true);
   assert.equal(isBridgeRequestMessage({ type: "error" }), false);
   assert.equal(isBridgeRequestMessage(null), false);
 });

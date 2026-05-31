@@ -8,13 +8,14 @@ import { completePairing, getPairingSession, verifyMobileDevice } from "./pairin
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 19455;
-const MAX_BRIDGE_MESSAGE_BYTES = 1_000_000;
+const MAX_BRIDGE_MESSAGE_BYTES = 10_000_000;
 const responseTypes = Object.freeze({
   "openai.status.get": "openai.status",
   "realtime.secret.create": "realtime.secret",
   "tools.definitions.get": "tools.definitions",
   "tools.execute": "tools.result",
   "assistant.message": "assistant.reply",
+  "voice.turn": "voice.reply",
 });
 
 export function createMobileBridgeServer(options = {}) {
@@ -229,6 +230,12 @@ export function createMobileBridgeServer(options = {}) {
           responseTypes[message.type],
           message.requestId,
           await callHandler("sendAssistantMessage", message.message, message.history),
+        );
+      case "voice.turn":
+        return createBridgeResponse(
+          responseTypes[message.type],
+          message.requestId,
+          await callHandler("sendVoiceTurn", message.audio, message.history),
         );
       default:
         throw new Error(`Unsupported authenticated bridge message: ${message.type}`);

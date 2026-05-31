@@ -8,9 +8,13 @@ const bridgeRequestTypes = new Set([
   "tools.definitions.get",
   "tools.execute",
   "assistant.message",
+  "voice.turn",
 ]);
 
 const MAX_REQUEST_ID_LENGTH = 120;
+const MAX_VOICE_CHUNKS = 800;
+const MAX_VOICE_BASE64_BYTES = 8 * 1024 * 1024;
+const supportedVoiceEncodings = new Set(["pcm16", "aac_m4a"]);
 
 export function normalizeBridgeMessage(value) {
   if (!isPlainObject(value)) {
@@ -35,6 +39,8 @@ export function normalizeBridgeMessage(value) {
       return normalizeToolExecuteMessage(value, requestId);
     case "assistant.message":
       return normalizeAssistantMessage(value, requestId);
+    case "voice.turn":
+      return normalizeVoiceTurnMessage(value, requestId);
     default:
       return { type, requestId };
   }
@@ -143,6 +149,81 @@ function normalizeToolExecuteMessage(value, requestId) {
     name: value.name.trim(),
     args: value.args ?? {},
   };
+}
+
+function normalizeVoiceTurnMessage(value, requestId) {
+  if (!isPlainObject(value.audio)) {
+    throw new Error("voice.turn.audio must be an object.");
+  }
+  const encoding = normalizeVoiceEncoding(value.audio.encoding);
+  const chunks = normalizeVoiceAudioChunks(value.audio);
+  const sampleRate = normalizeVoiceSampleRate(value.audio.sampleRate);
+  const channels = normalizeVoiceChannels(value.audio.channels);
+  return {
+    type: "voice.turn",
+    requestId,
+    audio: {
+      chunks,
+      sampleRate,
+      channels,
+      encoding,
+      mimeType: normalizeOptionalString(value.audio.mimeType),
+    },
+    history: normalizeAssistantHistory(value.history),
+  };
+}
+
+function normalizeVoiceAudioChunks(audio) {
+  const rawChunks = Array.isArray(audio.chunks)
+    ? audio.chunks
+    : typeof audio.base64 === "string"
+      ? [audio.base64]
+      : [];
+  if (rawChunks.length === 0 || rawChunks.length > MAX_VOICE_CHUNKS) {
+    throw new Error("voice.turn.audio.chunks must include a reasonable number of chunks.");
+  }
+
+  let totalLength = 0;
+  const chunks = [];
+  for (const chunk of rawChunks) {
+    if (typeof chunk !== "string" || !chunk.trim()) {
+      throw new Error("voice.turn.audio chunks must be non-empty base64 strings.");
+    }
+    const trimmed = chunk.trim();
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(trimmed) || trimmed.length % 4 !== 0) {
+      throw new Error("voice.turn.audio chunks must be base64 encoded.");
+    }
+    totalLength += trimmed.length;
+    if (totalLength > MAX_VOICE_BASE64_BYTES) {
+      throw new Error("voice.turn.audio is too large.");
+    }
+    chunks.push(trimmed);
+  }
+  return chunks;
+}
+
+function normalizeVoiceSampleRate(value) {
+  const sampleRate = Number(value);
+  if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 48000) {
+    throw new Error("voice.turn.audio.sampleRate must be between 8000 and 48000.");
+  }
+  return sampleRate;
+}
+
+function normalizeVoiceChannels(value) {
+  const channels = Number(value);
+  if (!Number.isInteger(channels) || channels < 1 || channels > 2) {
+    throw new Error("voice.turn.audio.channels must be 1 or 2.");
+  }
+  return channels;
+}
+
+function normalizeVoiceEncoding(value) {
+  const encoding = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!supportedVoiceEncodings.has(encoding)) {
+    throw new Error("voice.turn.audio.encoding must be pcm16 or aac_m4a.");
+  }
+  return encoding;
 }
 
 function normalizeRequestId(value) {
