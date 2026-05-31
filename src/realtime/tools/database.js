@@ -73,7 +73,52 @@ function applySchema(db) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS mobile_devices (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT,
+      client_id TEXT UNIQUE
+    );
+    CREATE TABLE IF NOT EXISTS facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      content TEXT NOT NULL,
+      importance INTEGER NOT NULL DEFAULT 50,
+      last_accessed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ')),
+      UNIQUE(category, subject)
+    );
+    CREATE INDEX IF NOT EXISTS idx_facts_category_subject ON facts (category, subject);
+    CREATE INDEX IF NOT EXISTS idx_facts_importance_updated ON facts (importance, updated_at);
+    CREATE TABLE IF NOT EXISTS soul (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      aspect TEXT NOT NULL UNIQUE,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ'))
+    );
+    CREATE TABLE IF NOT EXISTS daily_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      content TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ'))
+    );
   `);
+  addColumnIfMissing(db, "mobile_devices", "client_id", "TEXT");
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_devices_client_id ON mobile_devices (client_id) WHERE client_id IS NOT NULL;",
+  );
+}
+
+function addColumnIfMissing(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition};`);
+  }
 }
 
 function getUserDataPath() {

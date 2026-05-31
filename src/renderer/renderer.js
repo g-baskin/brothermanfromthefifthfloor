@@ -17,13 +17,48 @@ const appMenuElement = document.querySelector("#app-menu");
 const openAIIndicatorElement = document.querySelector("#openai-indicator");
 const micSelectElement = document.querySelector("#mic-select");
 const permissionsToggleButton = document.querySelector("#permissions-toggle");
+const mobileToggleButton = document.querySelector("#mobile-toggle");
+const memoryToggleButton = document.querySelector("#memory-toggle");
+const settingsToggleButton = document.querySelector("#settings-toggle");
 const windowMinimizeButton = document.querySelector("#window-minimize");
 const appQuitButton = document.querySelector("#app-quit");
+const settingsPanelElement = document.querySelector("#settings-panel");
+const settingsBackButton = document.querySelector("#settings-back");
+const voiceSelectElement = document.querySelector("#voice-select");
+const customVoiceFieldElement = document.querySelector("#custom-voice-field");
+const customVoiceIdElement = document.querySelector("#custom-voice-id");
+const voiceDescriptionElement = document.querySelector("#voice-description");
 const permissionsPanelElement = document.querySelector("#permissions-panel");
 const permissionsBackButton = document.querySelector("#permissions-back");
 const permissionsRefreshButton = document.querySelector("#permissions-refresh");
 const diagnosticsOpenButton = document.querySelector("#diagnostics-open");
 const permissionsListElement = document.querySelector("#permissions-list");
+const mobilePanelElement = document.querySelector("#mobile-panel");
+const mobileBackButton = document.querySelector("#mobile-back");
+const mobileRefreshButton = document.querySelector("#mobile-refresh");
+const mobileStartPairingButton = document.querySelector("#mobile-start-pairing");
+const mobileStopPairingButton = document.querySelector("#mobile-stop-pairing");
+const mobileStatusElement = document.querySelector("#mobile-status");
+const mobileCodeElement = document.querySelector("#mobile-code");
+const mobileQrPanelElement = document.querySelector("#mobile-qr-panel");
+const mobileShowExpoQrButton = document.querySelector("#mobile-show-expo-qr");
+const mobileShowPairingQrButton = document.querySelector("#mobile-show-pairing-qr");
+const mobileQrTitleElement = document.querySelector("#mobile-qr-title");
+const mobileQrInstructionsElement = document.querySelector("#mobile-qr-instructions");
+const mobileExpoQrElement = document.querySelector("#mobile-expo-qr");
+const mobileExpoUrlElement = document.querySelector("#mobile-expo-url");
+const mobilePairingQrElement = document.querySelector("#mobile-pairing-qr");
+const mobilePairingUrlElement = document.querySelector("#mobile-pairing-url");
+const mobileDevicesElement = document.querySelector("#mobile-devices");
+const memoryPanelElement = document.querySelector("#memory-panel");
+const memoryBackButton = document.querySelector("#memory-back");
+const memoryRefreshButton = document.querySelector("#memory-refresh");
+const memoryFactsElement = document.querySelector("#memory-facts");
+const memorySoulElement = document.querySelector("#memory-soul");
+const memoryLogsElement = document.querySelector("#memory-logs");
+const memoryFactsUsageElement = document.querySelector("#memory-facts-usage");
+const memorySoulUsageElement = document.querySelector("#memory-soul-usage");
+const memoryLogsUsageElement = document.querySelector("#memory-logs-usage");
 const agentToggleButton = document.querySelector("#agent-toggle");
 const agentPanelElement = document.querySelector("#agent-panel");
 const agentBackButton = document.querySelector("#agent-back");
@@ -66,6 +101,9 @@ let selectedMicId = null;
 // While the welcome greeting plays we mute the mic so laptop speakers can't
 // echo it back and trigger a self-reply; this holds the safety-unmute timer.
 let welcomeMicGuardTimer = null;
+let voiceOptions = [];
+let selectedMobileQr = "expo";
+let mobilePairingRefreshTimer = null;
 const realtimeToolHandler = createRealtimeToolHandler({
   executeTool: (name, args) => window.brah.executeRealtimeTool(name, args),
   sendEvent: sendRealtimeDataChannelEvent,
@@ -261,6 +299,53 @@ async function refreshOpenAIStatus() {
   }
 }
 
+async function refreshSettings() {
+  const payload = await window.brah.getSettings();
+  voiceOptions = Array.isArray(payload.voices) ? payload.voices : [];
+  renderSettings(payload.settings ?? {});
+}
+
+function renderSettings(settings) {
+  const selectedVoice = typeof settings.voice === "string" ? settings.voice : "";
+  voiceSelectElement.replaceChildren(
+    ...voiceOptions.map((voice) => {
+      const option = document.createElement("option");
+      option.value = voice.id;
+      option.textContent = voice.label;
+      option.selected = voice.id === selectedVoice;
+      return option;
+    }),
+  );
+  customVoiceIdElement.value =
+    typeof settings.customVoiceId === "string" ? settings.customVoiceId : "";
+  renderVoiceDescription(selectedVoice);
+}
+
+function renderVoiceDescription(voiceId) {
+  const voice = voiceOptions.find((item) => item.id === voiceId);
+  const isCustomVoice = voiceId === "custom";
+  customVoiceFieldElement.hidden = !isCustomVoice;
+  voiceDescriptionElement.textContent = voice?.description ?? "Choose how Brah sounds on calls.";
+}
+
+async function saveVoiceSetting() {
+  const voice = voiceSelectElement.value;
+  const customVoiceId = customVoiceIdElement.value;
+  voiceSelectElement.disabled = true;
+  customVoiceIdElement.disabled = true;
+  try {
+    const settings = await window.brah.updateSettings({ voice, customVoiceId });
+    renderSettings(settings);
+    setStatus("Voice saved");
+  } catch (error) {
+    setStatus(`Voice save failed: ${error.message}`);
+    await refreshSettings();
+  } finally {
+    voiceSelectElement.disabled = false;
+    customVoiceIdElement.disabled = false;
+  }
+}
+
 async function refreshOsPermissions() {
   const permissions = await window.brah.getOsPermissions();
   renderOsPermissions(permissions);
@@ -352,6 +437,369 @@ async function openOsPermissionSettings(id) {
   } catch (error) {
     setStatus(`Settings failed: ${error.message}`);
   }
+}
+
+function openMobilePanel() {
+  setMenuOpen(false);
+  settingsPanelElement.hidden = true;
+  permissionsPanelElement.hidden = true;
+  agentPanelElement.hidden = true;
+  memoryPanelElement.hidden = true;
+  mobilePanelElement.hidden = false;
+  void refreshMobileBridgeStatus();
+}
+
+function closeMobilePanel() {
+  mobilePanelElement.hidden = true;
+}
+
+async function refreshMobileBridgeStatus() {
+  try {
+    const status = await window.brah.getMobileBridgeStatus();
+    renderMobileBridgeStatus(status);
+    if (status?.pairing?.active) {
+      await refreshMobilePairingQr();
+    }
+  } catch (error) {
+    mobileStatusElement.textContent = `Bridge status failed: ${error.message}`;
+  }
+}
+
+async function startMobilePairing() {
+  mobileStartPairingButton.disabled = true;
+  try {
+    renderMobileBridgeStatus(await window.brah.startMobilePairing());
+    await refreshMobilePairingQr();
+    setStatus("Mobile pairing started");
+  } catch (error) {
+    setStatus(`Pairing failed: ${error.message}`);
+    await refreshMobileBridgeStatus();
+  }
+}
+
+async function stopMobilePairing() {
+  mobileStopPairingButton.disabled = true;
+  try {
+    renderMobileBridgeStatus(await window.brah.stopMobilePairing());
+    setStatus("Mobile pairing stopped");
+  } catch (error) {
+    setStatus(`Stop pairing failed: ${error.message}`);
+    await refreshMobileBridgeStatus();
+  }
+}
+
+function renderMobileBridgeStatus(status) {
+  const running = Boolean(status?.running);
+  const host = typeof status?.host === "string" ? status.host : "127.0.0.1";
+  const port = status?.port ?? 19455;
+  const pairing = status?.pairing ?? { active: false };
+  const bridgeScope = host === "127.0.0.1" ? "desktop-only" : "LAN-ready for Android";
+  mobileStatusElement.textContent = running
+    ? `Bridge running on ws://${host}:${port} (${bridgeScope})`
+    : "Bridge is not running.";
+  if (pairing.active) {
+    mobileCodeElement.replaceChildren(
+      createPairingCodeLabel("Pairing code"),
+      createPairingCodeValue(pairing.code),
+      createPairingCodeMeta(`${host}:${port} · expires ${formatMobileExpiry(pairing.expiresAt)}`),
+    );
+  } else {
+    mobileCodeElement.textContent = "Pairing inactive";
+  }
+  scheduleMobilePairingRefresh(pairing);
+  mobileStartPairingButton.disabled = Boolean(pairing.active);
+  mobileStopPairingButton.disabled = !pairing.active;
+  if (!pairing.active) {
+    renderMobilePairingQr(null);
+  } else if (status?.pairingPayload || status?.expoUrl) {
+    renderMobilePairingQr({
+      pairingPayload: status.pairingPayload,
+      pairingDeepLink: status.pairingDeepLink,
+      expoUrl: status.expoUrl,
+    });
+  }
+  renderMobileDevices(Array.isArray(status?.devices) ? status.devices : []);
+}
+
+async function refreshMobilePairingQr() {
+  try {
+    renderMobilePairingQr(await window.brah.getMobilePairingQr());
+  } catch (error) {
+    mobileQrPanelElement.hidden = false;
+    mobilePairingUrlElement.textContent = `QR failed: ${error.message}`;
+  }
+}
+
+function scheduleMobilePairingRefresh(pairing) {
+  if (mobilePairingRefreshTimer) {
+    clearTimeout(mobilePairingRefreshTimer);
+    mobilePairingRefreshTimer = null;
+  }
+  if (!pairing?.active || typeof pairing.expiresAt !== "number") {
+    return;
+  }
+  const delay = Math.max(1000, Math.min(pairing.expiresAt - Date.now() + 500, 30_000));
+  mobilePairingRefreshTimer = setTimeout(() => {
+    void refreshMobileBridgeStatus();
+  }, delay);
+}
+
+function createPairingCodeLabel(text) {
+  const label = document.createElement("span");
+  label.className = "mobile-code-label";
+  label.textContent = text;
+  return label;
+}
+
+function createPairingCodeValue(text) {
+  const value = document.createElement("strong");
+  value.className = "mobile-code-value";
+  value.textContent = text;
+  return value;
+}
+
+function createPairingCodeMeta(text) {
+  const meta = document.createElement("span");
+  meta.className = "mobile-code-meta";
+  meta.textContent = text;
+  return meta;
+}
+
+function renderMobilePairingQr(payload) {
+  const pairingPayload = payload?.pairingPayload ?? null;
+  const hasExpoQr = Boolean(payload?.expoQrDataUrl);
+  const hasPairingQr = Boolean(payload?.pairingQrDataUrl);
+  const expoUrl = typeof payload?.expoUrl === "string" ? payload.expoUrl : "";
+  const pairingUrl = pairingPayload ? JSON.stringify(pairingPayload) : "";
+  const pairingDeepLink =
+    typeof payload?.pairingDeepLink === "string" ? payload.pairingDeepLink : "";
+
+  mobileQrPanelElement.hidden = !pairingPayload;
+  if (!pairingPayload) {
+    return;
+  }
+
+  if (!hasExpoQr && selectedMobileQr === "expo") {
+    selectedMobileQr = "pairing";
+  }
+
+  mobileShowExpoQrButton.disabled = !hasExpoQr;
+  mobileShowPairingQrButton.disabled = !hasPairingQr;
+  mobileShowExpoQrButton.dataset.active = String(selectedMobileQr === "expo");
+  mobileShowPairingQrButton.dataset.active = String(selectedMobileQr === "pairing");
+
+  mobileExpoQrElement.hidden = selectedMobileQr !== "expo" || !hasExpoQr;
+  mobileExpoUrlElement.hidden = selectedMobileQr !== "expo";
+  mobilePairingQrElement.hidden = selectedMobileQr !== "pairing" || !hasPairingQr;
+  mobilePairingUrlElement.hidden = selectedMobileQr !== "pairing";
+
+  mobileQrTitleElement.textContent =
+    selectedMobileQr === "expo" ? "One-scan setup" : "Manual pair QR";
+  mobileQrInstructionsElement.textContent =
+    selectedMobileQr === "expo"
+      ? "Scan this with Expo Go to open Brah Mobile and load the pairing details."
+      : "Use this only if Brah Mobile is already open: tap Scan QR, then scan this code.";
+
+  if (payload?.expoQrDataUrl) {
+    mobileExpoQrElement.src = payload.expoQrDataUrl;
+  } else {
+    mobileExpoQrElement.removeAttribute("src");
+  }
+  if (payload?.pairingQrDataUrl) {
+    mobilePairingQrElement.src = payload.pairingQrDataUrl;
+  } else {
+    mobilePairingQrElement.removeAttribute("src");
+  }
+  mobileExpoUrlElement.textContent = expoUrl
+    ? `Expo Go fallback with pairing: ${expoUrl}`
+    : "Fallback: run npm run mobile:start, then open the printed Expo URL.";
+  mobilePairingUrlElement.textContent = pairingDeepLink
+    ? `Open link fallback: ${pairingDeepLink}`
+    : pairingUrl
+      ? `Manual fallback: ${pairingUrl}`
+      : "";
+}
+
+function setMobileQrSelection(selection) {
+  selectedMobileQr = selection;
+  void refreshMobilePairingQr();
+}
+
+function renderMobileDevices(devices) {
+  if (devices.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "mobile-empty";
+    empty.textContent = "No paired devices yet.";
+    mobileDevicesElement.replaceChildren(empty);
+    return;
+  }
+
+  mobileDevicesElement.replaceChildren(
+    ...devices.map((device) => {
+      const item = document.createElement("div");
+      item.className = "mobile-device";
+
+      const details = document.createElement("div");
+      details.className = "mobile-device-details";
+      const name = document.createElement("strong");
+      name.textContent = device.name || "Mobile device";
+      const meta = document.createElement("span");
+      meta.textContent = `Last seen ${formatMobileDate(device.lastSeenAt)}`;
+      const clientId = document.createElement("code");
+      clientId.className = "mobile-device-client-id";
+      clientId.textContent = device.clientId
+        ? `Client ID: ${device.clientId}`
+        : "Client ID: legacy / missing";
+      details.append(name, meta, clientId);
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.textContent = "Remove";
+      deleteButton.addEventListener("click", () => deleteMobileDevice(device.id));
+      item.append(details, deleteButton);
+      return item;
+    }),
+  );
+}
+
+async function deleteMobileDevice(deviceId) {
+  try {
+    renderMobileBridgeStatus(await window.brah.deleteMobileDevice(deviceId));
+    setStatus("Mobile device removed");
+  } catch (error) {
+    setStatus(`Remove device failed: ${error.message}`);
+  }
+}
+
+function formatMobileExpiry(value) {
+  if (typeof value !== "number") {
+    return "soon";
+  }
+  const remainingSeconds = Math.max(0, Math.ceil((value - Date.now()) / 1000));
+  const remainingMinutes = Math.ceil(remainingSeconds / 60);
+  return `${new Date(value).toLocaleTimeString([], { timeStyle: "short" })} (${remainingMinutes} min)`;
+}
+
+function formatMobileDate(value) {
+  if (typeof value !== "string" || !value) {
+    return "never";
+  }
+  return new Date(value).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+}
+
+function openMemoryPanel() {
+  setMenuOpen(false);
+  settingsPanelElement.hidden = true;
+  permissionsPanelElement.hidden = true;
+  agentPanelElement.hidden = true;
+  mobilePanelElement.hidden = true;
+  memoryPanelElement.hidden = false;
+  void refreshMemoryOverview();
+}
+
+function closeMemoryPanel() {
+  memoryPanelElement.hidden = true;
+}
+
+async function refreshMemoryOverview() {
+  try {
+    renderMemoryOverview(await window.brah.getMemoryOverview());
+  } catch (error) {
+    setStatus(`Memory failed: ${error.message}`);
+  }
+}
+
+function renderMemoryOverview(overview) {
+  const facts = Array.isArray(overview?.facts) ? overview.facts : [];
+  const soul = Array.isArray(overview?.soul) ? overview.soul : [];
+  const dailyLogs = Array.isArray(overview?.dailyLogs) ? overview.dailyLogs : [];
+  renderMemoryUsage(memoryFactsUsageElement, overview?.usage?.facts);
+  renderMemoryUsage(memorySoulUsageElement, overview?.usage?.soul);
+  renderMemoryUsage(memoryLogsUsageElement, overview?.usage?.dailyLogs);
+  renderFacts(facts);
+  renderSoulAspects(soul);
+  renderDailyLogs(dailyLogs);
+}
+
+function renderMemoryUsage(element, usage) {
+  const pct = Number.isFinite(usage?.pct) ? usage.pct : 0;
+  element.textContent = `${pct}%`;
+  element.dataset.level = pct >= 85 ? "high" : pct >= 65 ? "medium" : "low";
+}
+
+function renderFacts(facts) {
+  if (facts.length === 0) {
+    renderMemoryEmpty(memoryFactsElement, "No facts stored yet.");
+    return;
+  }
+  memoryFactsElement.replaceChildren(
+    ...facts.map((fact) =>
+      createMemoryItem({
+        title: `${fact.category} · ${fact.subject}`,
+        body: fact.content,
+        meta: `Importance ${fact.importance ?? 50} · updated ${formatMemoryDate(fact.updated_at)}`,
+      }),
+    ),
+  );
+}
+
+function renderSoulAspects(aspects) {
+  if (aspects.length === 0) {
+    renderMemoryEmpty(memorySoulElement, "No soul aspects yet.");
+    return;
+  }
+  memorySoulElement.replaceChildren(
+    ...aspects.map((aspect) =>
+      createMemoryItem({
+        title: aspect.aspect,
+        body: aspect.content,
+        meta: `Updated ${formatMemoryDate(aspect.updated_at)}`,
+      }),
+    ),
+  );
+}
+
+function renderDailyLogs(logs) {
+  if (logs.length === 0) {
+    renderMemoryEmpty(memoryLogsElement, "No daily logs yet.");
+    return;
+  }
+  memoryLogsElement.replaceChildren(
+    ...logs.map((log) =>
+      createMemoryItem({
+        title: log.date,
+        body: log.content,
+        meta: `Updated ${formatMemoryDate(log.updated_at)}`,
+      }),
+    ),
+  );
+}
+
+function renderMemoryEmpty(element, text) {
+  const empty = document.createElement("p");
+  empty.className = "memory-empty";
+  empty.textContent = text;
+  element.replaceChildren(empty);
+}
+
+function createMemoryItem({ title, body, meta }) {
+  const item = document.createElement("div");
+  item.className = "memory-item";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const content = document.createElement("p");
+  content.textContent = body;
+  const detail = document.createElement("span");
+  detail.textContent = meta;
+  item.append(heading, content, detail);
+  return item;
+}
+
+function formatMemoryDate(value) {
+  if (typeof value !== "string" || !value) {
+    return "unknown";
+  }
+  return new Date(value).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 }
 
 async function connectOpenAI() {
@@ -1091,6 +1539,10 @@ connectOpenAIButton.addEventListener("click", () => {
 });
 permissionsToggleButton.addEventListener("click", () => {
   setMenuOpen(false);
+  settingsPanelElement.hidden = true;
+  agentPanelElement.hidden = true;
+  mobilePanelElement.hidden = true;
+  memoryPanelElement.hidden = true;
   permissionsPanelElement.hidden = !permissionsPanelElement.hidden;
   if (!permissionsPanelElement.hidden) {
     void refreshOsPermissions();
@@ -1098,6 +1550,10 @@ permissionsToggleButton.addEventListener("click", () => {
 });
 agentToggleButton.addEventListener("click", () => {
   setMenuOpen(false);
+  settingsPanelElement.hidden = true;
+  permissionsPanelElement.hidden = true;
+  mobilePanelElement.hidden = true;
+  memoryPanelElement.hidden = true;
   agentPanelElement.hidden = !agentPanelElement.hidden;
   if (!agentPanelElement.hidden) {
     agentStatusElement.textContent = "";
@@ -1111,6 +1567,40 @@ agentFormElement.addEventListener("submit", (event) => {
   event.preventDefault();
   void saveAgentProfile();
 });
+mobileToggleButton.addEventListener("click", openMobilePanel);
+mobileBackButton.addEventListener("click", closeMobilePanel);
+mobileRefreshButton.addEventListener("click", () => {
+  void refreshMobileBridgeStatus();
+});
+mobileStartPairingButton.addEventListener("click", () => {
+  selectedMobileQr = "expo";
+  void startMobilePairing();
+});
+mobileStopPairingButton.addEventListener("click", () => {
+  void stopMobilePairing();
+});
+mobileShowExpoQrButton.addEventListener("click", () => {
+  setMobileQrSelection("expo");
+});
+mobileShowPairingQrButton.addEventListener("click", () => {
+  setMobileQrSelection("pairing");
+});
+memoryToggleButton.addEventListener("click", openMemoryPanel);
+memoryBackButton.addEventListener("click", closeMemoryPanel);
+memoryRefreshButton.addEventListener("click", () => {
+  void refreshMemoryOverview();
+});
+settingsToggleButton.addEventListener("click", () => {
+  setMenuOpen(false);
+  permissionsPanelElement.hidden = true;
+  agentPanelElement.hidden = true;
+  mobilePanelElement.hidden = true;
+  memoryPanelElement.hidden = true;
+  settingsPanelElement.hidden = !settingsPanelElement.hidden;
+  if (!settingsPanelElement.hidden) {
+    void refreshSettings();
+  }
+});
 windowMinimizeButton.addEventListener("click", () => {
   setMenuOpen(false);
   void window.brah.minimizeWindow();
@@ -1118,6 +1608,16 @@ windowMinimizeButton.addEventListener("click", () => {
 appQuitButton.addEventListener("click", () => {
   setMenuOpen(false);
   void window.brah.quitApp();
+});
+settingsBackButton.addEventListener("click", () => {
+  settingsPanelElement.hidden = true;
+});
+voiceSelectElement.addEventListener("change", () => {
+  renderVoiceDescription(voiceSelectElement.value);
+  void saveVoiceSetting();
+});
+customVoiceIdElement.addEventListener("change", () => {
+  void saveVoiceSetting();
 });
 permissionsBackButton.addEventListener("click", () => {
   permissionsPanelElement.hidden = true;
@@ -1161,8 +1661,17 @@ refreshOpenAIStatus().catch((error) => {
   setOpenAIConnected(false);
   setStatus(`Status failed: ${error.message}`);
 });
+refreshSettings().catch((error) => {
+  setStatus(`Settings failed: ${error.message}`);
+});
 refreshOsPermissions().catch((error) => {
   setStatus(`Permissions failed: ${error.message}`);
+});
+refreshMobileBridgeStatus().catch((error) => {
+  setStatus(`Mobile bridge failed: ${error.message}`);
+});
+refreshMemoryOverview().catch((error) => {
+  setStatus(`Memory failed: ${error.message}`);
 });
 loadAgentProfile().catch((error) => {
   setStatus(`Agent profile failed: ${error.message}`);

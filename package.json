@@ -5,6 +5,9 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
+    "mobile:install": "npm install --prefix mobile/brah-mobile",
+    "mobile:android": "npm run android --prefix mobile/brah-mobile",
+    "mobile:start": "npm run start --prefix mobile/brah-mobile",
     "check": "biome check .",
     "format": "biome format --write .",
     "lint": "biome lint .",
@@ -56,6 +59,8 @@
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
     "electron-updater": "^6.8.3",
-    "playwright": "^1.60.0"
+    "playwright": "^1.60.0",
+    "qrcode": "^1.5.4",
+    "ws": "^8.21.0"
   }
 }

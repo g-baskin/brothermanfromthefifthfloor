@@ -65,6 +65,15 @@
           <button id="permissions-toggle" type="button" class="menu-item" role="menuitem">
             Permissions
           </button>
+          <button id="mobile-toggle" type="button" class="menu-item" role="menuitem">
+            Mobile
+          </button>
+          <button id="memory-toggle" type="button" class="menu-item" role="menuitem">
+            Memory + Soul
+          </button>
+          <button id="settings-toggle" type="button" class="menu-item" role="menuitem">
+            Settings
+          </button>
           <button id="window-minimize" type="button" class="menu-item" role="menuitem">
             Minimize
           </button>
@@ -72,6 +81,32 @@
             Quit
           </button>
         </div>
+        <section
+          id="settings-panel"
+          class="settings-panel"
+          hidden
+          aria-label="Brah settings"
+        >
+          <div class="view-header">
+            <button id="settings-back" type="button" class="view-back" aria-label="Back">
+              ‹
+            </button>
+            <strong class="view-title">Settings</strong>
+          </div>
+          <div class="settings-list">
+            <label class="settings-field" for="voice-select">
+              <span class="settings-label">Assistant voice</span>
+              <span class="settings-hint">Applies when you start your next call.</span>
+              <select id="voice-select" class="settings-select"></select>
+            </label>
+            <label id="custom-voice-field" class="settings-field settings-field-compact" for="custom-voice-id" hidden>
+              <span class="settings-label">Custom OpenAI voice ID</span>
+              <span class="settings-hint">Use only a licensed or consented voice, for example voice_1234.</span>
+              <input id="custom-voice-id" class="settings-input" type="text" placeholder="voice_1234" autocomplete="off" spellcheck="false" />
+            </label>
+            <p id="voice-description" class="settings-description"></p>
+          </div>
+        </section>
         <section
           id="permissions-panel"
           class="permissions-panel"
@@ -95,6 +130,108 @@
             <button id="diagnostics-open" type="button">Log</button>
           </div>
           <div id="permissions-list" class="permissions-list"></div>
+        </section>
+        <section id="mobile-panel" class="mobile-panel" hidden aria-label="Mobile bridge">
+          <div class="view-header">
+            <button id="mobile-back" type="button" class="view-back" aria-label="Back">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+                <path
+                  d="M15 5l-7 7 7 7"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <strong class="view-title">Mobile</strong>
+            <button id="mobile-refresh" type="button">Refresh</button>
+          </div>
+          <div class="mobile-body">
+            <article class="mobile-card">
+              <h2>Desktop bridge</h2>
+              <p id="mobile-status" class="mobile-status">Checking bridge…</p>
+            </article>
+            <article class="mobile-card">
+              <h2>Pair a phone</h2>
+              <p class="mobile-hint">
+                Start pairing, then scan the one-scan setup QR. If Android asks for a code, use the big pairing code below.
+              </p>
+              <div id="mobile-code" class="mobile-code" aria-live="polite">———</div>
+              <div id="mobile-qr-panel" class="mobile-qr-panel" hidden>
+                <div class="mobile-qr-toggle" role="group" aria-label="Mobile QR code chooser">
+                  <button id="mobile-show-expo-qr" type="button" class="mobile-qr-toggle-button" data-active="true">One-scan setup</button>
+                  <button id="mobile-show-pairing-qr" type="button" class="mobile-qr-toggle-button" data-active="false">Manual pair QR</button>
+                </div>
+                <div class="mobile-qr-card">
+                  <strong id="mobile-qr-title">One-scan setup</strong>
+                  <p id="mobile-qr-instructions" class="mobile-hint">Scan this with Expo Go to open Brah Mobile and load pairing details.</p>
+                  <img id="mobile-expo-qr" class="mobile-qr" alt="Expo launch QR code" />
+                  <img id="mobile-pairing-qr" class="mobile-qr" alt="Brah pairing QR code" hidden />
+                  <span id="mobile-expo-url" class="mobile-link-text"></span>
+                  <span id="mobile-pairing-url" class="mobile-link-text" hidden></span>
+                </div>
+              </div>
+              <p class="mobile-hint">Pairing briefly exposes the bridge on your local network, then paired devices authenticate with a saved device token.</p>
+              <div class="mobile-actions">
+                <button id="mobile-start-pairing" type="button">Start pairing</button>
+                <button id="mobile-stop-pairing" type="button">Stop pairing</button>
+              </div>
+            </article>
+            <article class="mobile-card">
+              <h2>Telegram chat</h2>
+              <p class="mobile-hint">
+                Not wired yet. The current mobile slice is the Android/Expo bridge client; Telegram bot/chat support still needs its token setup, channel service, and bridge routing.
+              </p>
+            </article>
+            <article class="mobile-card">
+              <h2>Paired devices</h2>
+              <div id="mobile-devices" class="mobile-device-list"></div>
+            </article>
+          </div>
+        </section>
+        <section id="memory-panel" class="memory-panel" hidden aria-label="Memory and soul">
+          <div class="view-header">
+            <button id="memory-back" type="button" class="view-back" aria-label="Back">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+                <path
+                  d="M15 5l-7 7 7 7"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <strong class="view-title">Memory + Soul</strong>
+            <button id="memory-refresh" type="button">Refresh</button>
+          </div>
+          <div class="memory-body">
+            <article class="memory-card">
+              <div class="memory-card-header">
+                <h2>Known facts</h2>
+                <span id="memory-facts-usage" class="memory-usage">0%</span>
+              </div>
+              <p class="memory-hint">Stable things Brah can remember and update over time.</p>
+              <div id="memory-facts" class="memory-list"></div>
+            </article>
+            <article class="memory-card">
+              <div class="memory-card-header">
+                <h2>Soul</h2>
+                <span id="memory-soul-usage" class="memory-usage">0%</span>
+              </div>
+              <p class="memory-hint">Lessons about how Brah should work with you, not facts about you.</p>
+              <div id="memory-soul" class="memory-list"></div>
+            </article>
+            <article class="memory-card">
+              <div class="memory-card-header">
+                <h2>Daily logs</h2>
+                <span id="memory-logs-usage" class="memory-usage">0%</span>
+              </div>
+              <p class="memory-hint">Recent session continuity from the last few days.</p>
+              <div id="memory-logs" class="memory-list"></div>
+            </article>
+          </div>
         </section>
         <section id="agent-panel" class="agent-panel" hidden aria-label="Agent profile">
           <div class="view-header">

@@ -20,7 +20,7 @@ async function withProfileDb(callback) {
 test("missing agent profile falls back to defaults", async () => {
   await withProfileDb((filePath) => {
     const profile = loadAgentProfile(filePath);
-    assert.equal(profile.name, "Ken");
+    assert.equal(profile.name, "Greg");
     assert.deepEqual(profile.goals, []);
   });
 });

@@ -3,6 +3,15 @@ import test from "node:test";
 import { getRealtimeToolDefinitions } from "../src/realtime/tools/tool-schemas.js";
 
 const expectedToolNames = [
+  "remember",
+  "forget",
+  "list_facts",
+  "memory_search",
+  "daily_log",
+  "soul_set",
+  "soul_get",
+  "soul_list",
+  "soul_delete",
   "add_task",
   "list_tasks",
   "delete_task",
@@ -49,10 +58,11 @@ test("computer_use_task target enum offers browser and computer modes", () => {
 
 test("returned tool definitions are cloned to prevent caller mutation", () => {
   const first = getRealtimeToolDefinitions();
-  first[0].name = "mutated";
-  first[0].parameters.properties.name.type = "number";
+  const taskTool = first.find((tool) => tool.name === "add_task");
+  taskTool.name = "mutated";
+  taskTool.parameters.properties.name.type = "number";
 
-  const second = getRealtimeToolDefinitions();
-  assert.equal(second[0].name, "add_task");
-  assert.equal(second[0].parameters.properties.name.type, "string");
+  const secondTaskTool = getRealtimeToolDefinitions().find((tool) => tool.name === "add_task");
+  assert.equal(secondTaskTool.name, "add_task");
+  assert.equal(secondTaskTool.parameters.properties.name.type, "string");
 });

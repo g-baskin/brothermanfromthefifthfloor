@@ -111,7 +111,7 @@ export function sendRealtimeImageResponse(sendEvent, result) {
       output_modalities: ["audio"],
       input: [result.realtimeInput],
       instructions:
-        "Analyze the attached screenshot now and answer Ken directly. Do not say you are waiting for a screen read; the image is attached to this response input.",
+        "Analyze the attached screenshot now and answer Greg directly. Do not say you are waiting for a screen read; the image is attached to this response input.",
     },
   });
 }
@@ -121,7 +121,7 @@ export function createRealtimeImageToolOutput(result) {
   return {
     ...safeResult,
     message:
-      "Screenshot captured and attached to the Realtime conversation. Use the attached image to answer Ken's screen question.",
+      "Screenshot captured and attached to the Realtime conversation. Use the attached image to answer Greg's screen question.",
   };
 }
 

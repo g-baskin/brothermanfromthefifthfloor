@@ -1,11 +1,20 @@
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
+const nodeRequire = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 const sourceAliasTtlMs = 5 * 60 * 1000;
 const maxSources = 25;
 const thumbnailSize = Object.freeze({ width: 1920, height: 1080 });
 const realtimeImageMaxWidth = 1024;
+const macOsScreencapturePath = "/usr/sbin/screencapture";
+const macOsScreencaptureRetryDelayMs = 1_500;
+const macOsScreencaptureTimeoutMs = 10_000;
 const visionPrompt = `Analyze this screenshot for a voice assistant. Describe the visible app/window, important visible text, actionable UI elements, warnings/errors, and one suggested next action if obvious. Keep it concise and factual; do not invent hidden content.`;
 
 const sourceAliasState = {
@@ -19,12 +28,7 @@ export async function capturePrimaryScreenPng(options = {}) {
   if (!selected) {
     throw new Error("No primary screen source was found for capture.");
   }
-  let image = selected.thumbnail;
-  if (image.isEmpty()) {
-    throw new Error(
-      "Screen capture returned an empty image. On macOS, grant Screen Recording permission to Brah/Electron.",
-    );
-  }
+  let image = await resolveCaptureImage(selected, options);
   const resizeTo = options.resizeTo;
   if (
     isRecord(resizeTo) &&
@@ -242,18 +246,18 @@ async function captureScreenshot(args, options) {
     thumbnailSize: selected.thumbnail.getSize?.(),
   });
 
-  if (selected.thumbnail.isEmpty()) {
+  let image;
+  try {
+    image = await resolveCaptureImage(selected, options);
+  } catch (error) {
     return {
       ok: false,
       error: {
         status: "error",
-        message:
-          "Screenshot capture returned an empty image. On macOS, grant Screen Recording permission to Brah/Electron and try again.",
+        message: errorMessage(error),
       },
     };
   }
-
-  const image = selected.thumbnail;
   const size = image.getSize();
   const imagePng = image.toPNG();
   const realtimeImage = createRealtimeImage(image);
@@ -281,6 +285,220 @@ async function captureScreenshot(args, options) {
       type: selected.id.startsWith("screen:") ? "screen" : "window",
     },
   };
+}
+
+async function resolveCaptureImage(selected, options) {
+  if (!selected.thumbnail.isEmpty()) {
+    return selected.thumbnail;
+  }
+
+  if (!selected.id.startsWith("screen:")) {
+    throw new Error(createEmptyThumbnailMessage("window", options));
+  }
+
+  if (getPlatform(options) !== "darwin") {
+    throw new Error(createEmptyThumbnailMessage("screen", options));
+  }
+
+  await logScreenshotEvent(options, "screenshot.capture.macos_fallback.start", {
+    id: selected.id,
+    displayId: selected.display_id,
+  });
+  try {
+    const image = await captureMacOsScreenFallback(selected, options);
+    await logScreenshotEvent(options, "screenshot.capture.macos_fallback.finish", {
+      id: selected.id,
+      displayId: selected.display_id,
+      size: image.getSize?.(),
+    });
+    return image;
+  } catch (error) {
+    await logScreenshotEvent(options, "screenshot.capture.macos_fallback.error", {
+      id: selected.id,
+      displayId: selected.display_id,
+      error: formatError(error),
+    });
+    throw new Error(
+      `${createEmptyThumbnailMessage("screen", options)} macOS screencapture fallback failed: ${errorMessage(error)}`,
+    );
+  }
+}
+
+async function captureMacOsScreenFallback(selected, options) {
+  const displayNumber = getMacOsScreencaptureDisplayNumber(selected, options);
+  const attempts = getMacOsScreencaptureAttempts(selected, displayNumber, options);
+  let lastError = null;
+
+  for (const [index, attempt] of attempts.entries()) {
+    const tempPath = path.join(
+      os.tmpdir(),
+      `brah-screencapture-${process.pid}-${randomUUID()}.png`,
+    );
+    try {
+      if (index > 0) {
+        await delay(getMacOsScreencaptureRetryDelayMs(options));
+      }
+      await logScreenshotEvent(options, "screenshot.capture.macos_fallback.attempt", {
+        attempt: index + 1,
+        args: attempt.args.slice(0, -1),
+        displayNumber,
+      });
+      await runMacOsScreencapture(attempt.args, tempPath, options);
+      const png = await fs.readFile(tempPath);
+      if (png.length === 0) {
+        throw new Error("macOS screencapture wrote an empty PNG file.");
+      }
+      return createNativeImageFromPng(png, options);
+    } catch (error) {
+      lastError = error;
+      await logScreenshotEvent(options, "screenshot.capture.macos_fallback.attempt_error", {
+        attempt: index + 1,
+        args: attempt.args.slice(0, -1),
+        error: formatError(error),
+      });
+    } finally {
+      await cleanupTempFile(tempPath, options);
+    }
+  }
+
+  throw lastError ?? new Error("macOS screencapture fallback did not run.");
+}
+
+function getMacOsScreencaptureDisplayNumber(selected, options) {
+  const { displayIndex } = getMacOsScreencaptureDisplayMatch(selected, options);
+  return displayIndex + 1;
+}
+
+function getMacOsScreencaptureAttempts(selected, displayNumber, options) {
+  const displayMatch = getMacOsScreencaptureDisplayMatch(selected, options);
+  const displayArgs = ["-x", "-t", "png", "-D", String(displayNumber)];
+  if (!isPrimaryDisplayMatch(displayMatch, options)) {
+    return [{ args: displayArgs }, { args: displayArgs }];
+  }
+  return [{ args: displayArgs }, { args: ["-x", "-t", "png", "-m"] }, { args: displayArgs }];
+}
+
+function getMacOsScreencaptureDisplayMatch(selected, options) {
+  const displayId = String(selected.display_id ?? "");
+  if (!displayId) {
+    throw new Error("Selected screen source has no display_id for macOS screencapture fallback.");
+  }
+  const electronScreen = options.screen ?? getElectronModule()?.screen;
+  const displays = electronScreen?.getAllDisplays?.();
+  if (!Array.isArray(displays) || displays.length === 0) {
+    throw new Error("Electron screen.getAllDisplays() returned no displays for macOS fallback.");
+  }
+  const displayIndex = displays.findIndex((display) => String(display?.id ?? "") === displayId);
+  if (displayIndex === -1) {
+    throw new Error(
+      `Selected screen display_id "${displayId}" did not match any display returned by screen.getAllDisplays().`,
+    );
+  }
+  return { display: displays[displayIndex], displayIndex };
+}
+
+function isPrimaryDisplayMatch(displayMatch, options) {
+  const electronScreen = options.screen ?? getElectronModule()?.screen;
+  const primaryDisplayId = String(electronScreen?.getPrimaryDisplay?.().id ?? "");
+  return Boolean(primaryDisplayId) && String(displayMatch.display?.id ?? "") === primaryDisplayId;
+}
+
+async function runMacOsScreencapture(baseArgs, tempPath, options) {
+  const execFileImpl = options.macOsScreencaptureExecFile ?? execFileAsync;
+  await execFileImpl(macOsScreencapturePath, [...baseArgs, tempPath], {
+    timeout: macOsScreencaptureTimeoutMs,
+    maxBuffer: 1_000_000,
+  });
+}
+
+function getMacOsScreencaptureRetryDelayMs(options) {
+  return Number.isFinite(options.macOsScreencaptureRetryDelayMs)
+    ? Math.max(0, options.macOsScreencaptureRetryDelayMs)
+    : macOsScreencaptureRetryDelayMs;
+}
+
+function createNativeImageFromPng(png, options) {
+  const nativeImage = options.nativeImage ?? getElectronModule()?.nativeImage;
+  if (!nativeImage?.createFromBuffer) {
+    throw new Error("Electron nativeImage is unavailable for macOS screencapture fallback.");
+  }
+  const image = nativeImage.createFromBuffer(png);
+  if (!image || typeof image.getSize !== "function" || typeof image.toPNG !== "function") {
+    throw new Error("Electron nativeImage failed to decode the macOS screencapture PNG.");
+  }
+  if (typeof image.isEmpty === "function" && image.isEmpty()) {
+    throw new Error("macOS screencapture fallback returned an empty image.");
+  }
+  return image;
+}
+
+function createEmptyThumbnailMessage(sourceType, options) {
+  const permissionMessage = createScreenRecordingPermissionMessage(options);
+  if (sourceType === "window") {
+    return `Screenshot capture returned an empty window image. ${permissionMessage} The macOS screencapture fallback only applies to screen sources, so try a screen source or a different window.`;
+  }
+  return `Screenshot capture returned an empty screen image. ${permissionMessage}`;
+}
+
+function createScreenRecordingPermissionMessage(options) {
+  const status = getScreenRecordingStatus(options);
+  switch (status) {
+    case "granted":
+      return "Screen Recording permission appears granted, so this is likely an Electron desktopCapturer thumbnail failure rather than a missing permission.";
+    case "denied":
+    case "restricted":
+    case "not-determined":
+      return `Screen Recording permission is ${status}; grant Screen Recording to Brah/Electron and restart Brah if macOS requires it.`;
+    default:
+      return "Screen Recording permission status is unknown; on macOS, grant Screen Recording to Brah/Electron and try again.";
+  }
+}
+
+function getScreenRecordingStatus(options) {
+  if (typeof options.screenRecordingStatus === "string") {
+    return options.screenRecordingStatus;
+  }
+  if (typeof options.getScreenRecordingStatus === "function") {
+    try {
+      return options.getScreenRecordingStatus();
+    } catch {
+      return "unknown";
+    }
+  }
+  const systemPreferences = options.systemPreferences ?? getElectronModule()?.systemPreferences;
+  try {
+    return systemPreferences?.getMediaAccessStatus?.("screen") ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function getPlatform(options) {
+  return typeof options.platform === "string" ? options.platform : process.platform;
+}
+
+async function cleanupTempFile(tempPath, options) {
+  try {
+    await fs.unlink(tempPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      await logScreenshotEvent(options, "screenshot.capture.macos_fallback.cleanup_error", {
+        path: tempPath,
+        error: formatError(error),
+      });
+    }
+  }
+}
+
+async function delay(ms) {
+  if (ms <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function createRealtimeScreenshotInput(capture, args) {
@@ -540,11 +758,12 @@ function getUserDataPath(options) {
 }
 
 function getElectronModule() {
-  if (!globalThis.process?.type) {
+  if (!globalThis.process?.versions?.electron && !globalThis.process?.type) {
     return null;
   }
   try {
-    return globalThis.require?.("electron") ?? null;
+    const electron = globalThis.require?.("electron") ?? nodeRequire("electron");
+    return isRecord(electron) ? electron : null;
   } catch {
     return null;
   }

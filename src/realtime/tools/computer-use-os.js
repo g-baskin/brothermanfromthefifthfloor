@@ -97,7 +97,9 @@ export async function createOsComputerTarget(options = {}) {
       // otherwise makes the model's coordinates land off-target.
       const capture = await capturePrimaryScreenPng({
         desktopCapturer: options.desktopCapturer,
+        nativeImage: options.nativeImage,
         screen: options.screen,
+        systemPreferences: options.systemPreferences,
         logger: options.logger,
         resizeTo: { width: geometry.logicalWidth, height: geometry.logicalHeight },
       });

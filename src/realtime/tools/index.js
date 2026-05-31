@@ -1,5 +1,6 @@
 import { executeComputerUseTool } from "./computer-use-tools.js";
 import { executeFileSystemTool } from "./filesystem-tools.js";
+import { executeMemoryTool } from "./memory-tools.js";
 import { executePlannerTool } from "./planner-tools.js";
 import { executeScreenshotTool } from "./screenshot-tools.js";
 import { executeSessionTool } from "./session-tools.js";
@@ -9,6 +10,11 @@ import { executeWebTool } from "./web-tools.js";
 export { getRealtimeToolDefinitions };
 
 export async function executeRealtimeTool(name, args = {}, options = {}) {
+  const memoryResult = await executeMemoryTool(name, args, options.memory);
+  if (memoryResult) {
+    return memoryResult;
+  }
+
   const plannerResult = await executePlannerTool(name, args, options.planner);
   if (plannerResult) {
     return plannerResult;

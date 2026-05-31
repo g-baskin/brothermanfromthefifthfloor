@@ -80,6 +80,51 @@ const toolPermissionMetadata = Object.freeze({
     description:
       "Let OpenAI operate a browser harness or, in OS mode, control the real machine's mouse and keyboard from screenshots.",
   },
+  remember: {
+    level: "write",
+    label: "Remember fact",
+    description: "Save a long-term fact in local memory.",
+  },
+  forget: {
+    level: "destructive",
+    label: "Forget fact",
+    description: "Delete a long-term fact from local memory.",
+  },
+  list_facts: {
+    level: "read",
+    label: "Read facts",
+    description: "Read long-term facts from local memory.",
+  },
+  memory_search: {
+    level: "read",
+    label: "Search memory",
+    description: "Search long-term facts in local memory.",
+  },
+  daily_log: {
+    level: "write",
+    label: "Write daily log",
+    description: "Add a short entry to today's local daily log.",
+  },
+  soul_set: {
+    level: "write",
+    label: "Update soul",
+    description: "Save how Brah should work with you in local memory.",
+  },
+  soul_get: {
+    level: "read",
+    label: "Read soul",
+    description: "Read one soul aspect from local memory.",
+  },
+  soul_list: {
+    level: "read",
+    label: "List soul",
+    description: "Read all soul aspects from local memory.",
+  },
+  soul_delete: {
+    level: "destructive",
+    label: "Delete soul",
+    description: "Delete a soul aspect from local memory.",
+  },
   end_call: {
     level: "low",
     label: "End call",
@@ -105,7 +150,7 @@ export function getToolPermissionRequest(name, args = {}) {
 export function createPermissionDeniedResult(request) {
   return {
     status: "permission_denied",
-    message: `Ken did not approve ${request.label}. Ask before trying this tool again.`,
+    message: `Greg did not approve ${request.label}. Ask before trying this tool again.`,
     tool: request.toolName,
   };
 }
@@ -129,6 +174,21 @@ function resolveToolLevel(name, level, args) {
 
 function summarizeToolRequest(name, args) {
   switch (name) {
+    case "remember":
+      return summarizeFields(args, ["category", "subject"]);
+    case "forget":
+      return summarizeFields(args, ["id", "category", "subject"]);
+    case "list_facts":
+      return summarizeFields(args, ["category"]);
+    case "memory_search":
+      return summarizeFields(args, ["query", "category", "limit"]);
+    case "daily_log":
+      return summarizeFields(args, ["entry"]);
+    case "soul_set":
+      return summarizeFields(args, ["aspect"]);
+    case "soul_get":
+    case "soul_delete":
+      return summarizeFields(args, ["aspect"]);
     case "add_task":
       return summarizeFields(args, ["name", "priority"]);
     case "delete_task":

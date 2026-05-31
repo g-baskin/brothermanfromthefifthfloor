@@ -11,6 +11,211 @@ const taskStatusValues = Object.freeze(["todo", "in_progress", "completed"]);
 export const realtimeToolDefinitions = Object.freeze([
   {
     type: "function",
+    name: "remember",
+    description:
+      "Save one atomic long-term fact about Greg, his preferences, projects, people, work, or decisions. Use proactively when he shares meaningful stable information.",
+    parameters: {
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          description:
+            "Category such as user_info, preferences, projects, people, work, notes, or decisions.",
+          minLength: 1,
+          maxLength: 80,
+        },
+        subject: {
+          type: "string",
+          description:
+            "Specific key, for example partner_name, coffee_preference, current_project.",
+          minLength: 1,
+          maxLength: 120,
+        },
+        content: {
+          type: "string",
+          description: "One atomic fact, ideally under 30 words.",
+          minLength: 1,
+          maxLength: 500,
+        },
+        importance: {
+          type: "integer",
+          description: "Optional importance from 1-100. Defaults to 50.",
+          minimum: 1,
+          maximum: 100,
+        },
+      },
+      required: ["category", "subject", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "forget",
+    description:
+      "Remove a long-term fact by id, or by category plus subject, when it is wrong or stale.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Fact id from list_facts or memory_search.",
+          minimum: 1,
+        },
+        category: {
+          type: "string",
+          description: "Fact category when deleting by category+subject.",
+          minLength: 1,
+          maxLength: 80,
+        },
+        subject: {
+          type: "string",
+          description: "Fact subject when deleting by category+subject.",
+          minLength: 1,
+          maxLength: 120,
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "list_facts",
+    description:
+      "List known long-term facts. Use when Greg asks what you know or before deciding whether to remember/update something.",
+    parameters: {
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          description: "Optional category filter.",
+          minLength: 1,
+          maxLength: 80,
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "memory_search",
+    description: "Search long-term facts by category, subject, or content.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query.",
+          minLength: 1,
+          maxLength: 120,
+        },
+        category: {
+          type: "string",
+          description: "Optional category filter.",
+          minLength: 1,
+          maxLength: 80,
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum facts to return, default 6 and cap 20.",
+          minimum: 1,
+          maximum: 20,
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "daily_log",
+    description:
+      "Add one concise entry to today's daily log at major topic changes or session endings. Do not log every message.",
+    parameters: {
+      type: "object",
+      properties: {
+        entry: {
+          type: "string",
+          description: "One concise line describing what happened, max about 50 words.",
+          minLength: 1,
+          maxLength: 300,
+        },
+      },
+      required: ["entry"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "soul_set",
+    description:
+      "Record or update what you learn about working with Greg: communication corrections, boundaries, frustrations, and preferred dynamic. Not facts about him.",
+    parameters: {
+      type: "object",
+      properties: {
+        aspect: {
+          type: "string",
+          description:
+            "Aspect name, for example communication_style, boundaries, relationship, frustrations.",
+          minLength: 1,
+          maxLength: 80,
+        },
+        content: {
+          type: "string",
+          description: "Concise 1-2 sentence lesson about how to work with Greg.",
+          minLength: 1,
+          maxLength: 1200,
+        },
+      },
+      required: ["aspect", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "soul_get",
+    description: "Retrieve one soul aspect by name.",
+    parameters: {
+      type: "object",
+      properties: {
+        aspect: {
+          type: "string",
+          description: "Soul aspect name.",
+          minLength: 1,
+          maxLength: 80,
+        },
+      },
+      required: ["aspect"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "soul_list",
+    description: "List all soul aspects that shape how Brah works with Greg.",
+    parameters: emptyObjectParameters,
+  },
+  {
+    type: "function",
+    name: "soul_delete",
+    description: "Delete a soul aspect that is wrong or no longer relevant.",
+    parameters: {
+      type: "object",
+      properties: {
+        aspect: {
+          type: "string",
+          description: "Soul aspect name to delete.",
+          minLength: 1,
+          maxLength: 80,
+        },
+      },
+      required: ["aspect"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "add_task",
     description:
       "Add one short item to the local Tasks list when Ken asks to remember, plan, or track a task.",

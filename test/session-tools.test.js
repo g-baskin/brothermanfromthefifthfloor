@@ -3,10 +3,10 @@ import test from "node:test";
 import { executeSessionTool } from "../src/realtime/tools/session-tools.js";
 
 test("executeSessionTool ends the call and passes through a reason", async () => {
-  assert.deepEqual(await executeSessionTool("end_call", { reason: "Ken said goodbye" }), {
+  assert.deepEqual(await executeSessionTool("end_call", { reason: "Greg said goodbye" }), {
     status: "call_ended",
     message: "Ending the call. Goodbye.",
-    reason: "Ken said goodbye",
+    reason: "Greg said goodbye",
   });
 });
 

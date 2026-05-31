@@ -182,7 +182,7 @@ test("tool handler sends screenshot image as explicit response input", async () 
       output_modalities: ["audio"],
       input: [realtimeInput],
       instructions:
-        "Analyze the attached screenshot now and answer Ken directly. Do not say you are waiting for a screen read; the image is attached to this response input.",
+        "Analyze the attached screenshot now and answer Greg directly. Do not say you are waiting for a screen read; the image is attached to this response input.",
     },
   });
 });
@@ -210,7 +210,7 @@ test("end_call acknowledges without a new response and signals the host to hang 
         status: "completed",
         call_id: "call-end",
         name: "end_call",
-        arguments: '{"reason":"Ken said bye"}',
+        arguments: '{"reason":"Greg said bye"}',
       },
     }),
     true,
@@ -218,7 +218,7 @@ test("end_call acknowledges without a new response and signals the host to hang 
 
   // The renderer owns the hangup; end_call must not route to the IPC tool path.
   assert.deepEqual(executedCalls, []);
-  assert.deepEqual(endCalls, [{ reason: "Ken said bye" }]);
+  assert.deepEqual(endCalls, [{ reason: "Greg said bye" }]);
   // Exactly one event: the function_call_output, with no response.create follow-up.
   assert.equal(sentEvents.length, 1);
   assert.equal(sentEvents[0].type, "conversation.item.create");

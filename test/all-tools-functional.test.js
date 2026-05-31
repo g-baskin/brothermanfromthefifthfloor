@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { closeDatabase } from "../src/realtime/tools/database.js";
 import { executeRealtimeTool } from "../src/realtime/tools/index.js";
 import { getRealtimeToolDefinitions } from "../src/realtime/tools/tool-schemas.js";
 
@@ -66,9 +67,11 @@ async function withToolHarness(callback) {
       body: "<html><head><title>Functional Page</title></head><body><main><p>Fetched page body.</p></main></body></html>",
     });
   };
+  const storePath = path.join(directory, "brah.db");
   try {
     await callback({
-      planner: { storePath: path.join(directory, "planner", "items.json") },
+      memory: { storePath, now: new Date("2026-05-30T11:00:00") },
+      planner: { storePath },
       screenshot: {
         ...createScreenshotHarness(directory),
       },
@@ -80,6 +83,7 @@ async function withToolHarness(callback) {
     });
   } finally {
     globalThis.fetch = originalFetch;
+    closeDatabase(storePath);
     await rm(directory, { force: true, recursive: true });
   }
 }
@@ -176,6 +180,67 @@ test("every registered Realtime tool executes a functional path", async () => {
     };
 
     let result = await executeRealtimeTool(
+      "remember",
+      {
+        category: "projects",
+        subject: "brah",
+        content: "Brah is Greg's desktop assistant.",
+        importance: 75,
+      },
+      options,
+    );
+    observedNames.push("remember");
+    assert.equal(result.status, "remembered");
+    assert.equal(result.fact.subject, "brah");
+
+    result = await executeRealtimeTool("list_facts", {}, options);
+    observedNames.push("list_facts");
+    assert.equal(result.status, "listed");
+    assert.equal(result.facts.length, 1);
+
+    result = await executeRealtimeTool("memory_search", { query: "desktop" }, options);
+    observedNames.push("memory_search");
+    assert.equal(result.status, "searched");
+    assert.equal(result.facts.length, 1);
+
+    result = await executeRealtimeTool(
+      "daily_log",
+      { entry: "Ran functional tests for Pocket memory tools." },
+      options,
+    );
+    observedNames.push("daily_log");
+    assert.equal(result.status, "logged");
+
+    result = await executeRealtimeTool(
+      "soul_set",
+      { aspect: "repair", content: "Own misses plainly and fix them fast." },
+      options,
+    );
+    observedNames.push("soul_set");
+    assert.equal(result.status, "updated");
+
+    result = await executeRealtimeTool("soul_get", { aspect: "repair" }, options);
+    observedNames.push("soul_get");
+    assert.equal(result.status, "found");
+
+    result = await executeRealtimeTool("soul_list", {}, options);
+    observedNames.push("soul_list");
+    assert.equal(result.status, "listed");
+    assert.equal(result.aspects.length, 1);
+
+    result = await executeRealtimeTool("soul_delete", { aspect: "repair" }, options);
+    observedNames.push("soul_delete");
+    assert.equal(result.status, "deleted");
+
+    result = await executeRealtimeTool(
+      "forget",
+      { category: "projects", subject: "brah" },
+      options,
+    );
+    observedNames.push("forget");
+    assert.equal(result.status, "forgotten");
+
+    result = await executeRealtimeTool(
       "add_task",
       {
         name: "Ship functional tests",
@@ -325,10 +390,10 @@ test("every registered Realtime tool executes a functional path", async () => {
     observedNames.push("cancel_computer_use");
     assert.equal(result.status, "idle");
 
-    result = await executeRealtimeTool("end_call", { reason: "Ken said goodbye" }, options);
+    result = await executeRealtimeTool("end_call", { reason: "Greg said goodbye" }, options);
     observedNames.push("end_call");
     assert.equal(result.status, "call_ended");
-    assert.equal(result.reason, "Ken said goodbye");
+    assert.equal(result.reason, "Greg said goodbye");
 
     assert.deepEqual(
       observedNames.sort(),

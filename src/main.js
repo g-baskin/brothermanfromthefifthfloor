@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
@@ -12,12 +12,23 @@ import {
   BrowserWindow,
   desktopCapturer,
   ipcMain,
+  nativeImage,
   safeStorage,
   screen,
   shell,
   systemPreferences,
 } from "electron";
 import electronUpdater from "electron-updater";
+import QRCode from "qrcode";
+import WebSocket from "ws";
+import { createMobileBridgeServer } from "./mobile/bridge-server.js";
+import {
+  clearPairingSession,
+  createPairingSession,
+  deleteMobileDevice,
+  getPairingSession,
+  listMobileDevices,
+} from "./mobile/pairing-store.js";
 import {
   computerUseBrowserDocsUrl,
   createOsPermissionSnapshot,
@@ -32,8 +43,13 @@ import {
   recordActivity,
 } from "./realtime/tools/activity-store.js";
 import { loadAgentProfile, saveAgentProfile } from "./realtime/tools/agent-profile-store.js";
-import { setDatabaseUserDataPath } from "./realtime/tools/database.js";
+import { getDatabasePath, setDatabaseUserDataPath } from "./realtime/tools/database.js";
 import { executeRealtimeTool, getRealtimeToolDefinitions } from "./realtime/tools/index.js";
+import {
+  buildMemoryContext,
+  deleteDailyLog,
+  getMemoryOverview,
+} from "./realtime/tools/memory-store.js";
 import {
   loadMicrophoneDeviceId,
   saveMicrophoneDeviceId,
@@ -75,8 +91,66 @@ const openAIAuthConfig = Object.freeze({
 
 const realtimeDefaults = Object.freeze({
   model: "gpt-realtime-2",
-  voice: "marin",
+  voice: "cedar",
+  speed: 1.0,
   sampleRate: 24_000,
+});
+
+const mobileAssistantDefaults = Object.freeze({
+  model: "gpt-4.1-mini",
+  maxToolRounds: 5,
+});
+
+const jarvisStyleInstructions = `# Voice Preset
+- Use an original elite AI-butler/copilot style: calm, refined, precise, technically capable, and lightly dry.
+- Aim for a low-drama, polished, cinematic command-center feel without impersonating any real actor or copyrighted character.
+- Speak with composed confidence, crisp diction, and restrained warmth; never sound goofy, corporate, or overly cheerful.
+- Prefer concise acknowledgements like "Certainly", "Right away", "On it", "Handled", and occasional "sir" when it fits naturally.
+- Keep most replies to one clean sentence unless the task needs detail.
+- For status updates, sound operational: report what changed, what is running, what is blocked, and the next useful action.
+- When asked to operate tools, act like a capable systems copilot: calm preamble, execute, then concise result.
+- Do not claim to be any specific fictional assistant, and do not imitate a specific actor's voice.`;
+
+const realtimeVoicePresets = Object.freeze([
+  {
+    id: "jarvis",
+    label: "JARVIS-style",
+    description:
+      "Elite AI-butler/copilot feel using Cedar; original, not an actor or character clone.",
+    voice: "cedar",
+    speed: 0.9,
+    instructions: jarvisStyleInstructions,
+  },
+]);
+
+const realtimeBuiltInVoiceOptions = Object.freeze([
+  { id: "marin", label: "Marin", description: "Warm and natural" },
+  { id: "cedar", label: "Cedar", description: "Calm and grounded" },
+  { id: "alloy", label: "Alloy", description: "Balanced and clear" },
+  { id: "ash", label: "Ash", description: "Direct and steady" },
+  { id: "ballad", label: "Ballad", description: "Expressive and smooth" },
+  { id: "coral", label: "Coral", description: "Bright and conversational" },
+  { id: "echo", label: "Echo", description: "Crisp and articulate" },
+  { id: "sage", label: "Sage", description: "Measured and thoughtful" },
+  { id: "shimmer", label: "Shimmer", description: "Light and upbeat" },
+  { id: "verse", label: "Verse", description: "Polished and lively" },
+]);
+const customVoiceOption = Object.freeze({
+  id: "custom",
+  label: "Custom voice ID",
+  description: "Use a licensed OpenAI custom voice ID, such as voice_1234.",
+});
+const realtimeVoiceOptions = Object.freeze([
+  ...realtimeVoicePresets,
+  ...realtimeBuiltInVoiceOptions,
+  customVoiceOption,
+]);
+const realtimeBuiltInVoiceIds = new Set(realtimeBuiltInVoiceOptions.map((voice) => voice.id));
+const realtimeVoiceIds = new Set(realtimeVoiceOptions.map((voice) => voice.id));
+
+const defaultSettings = Object.freeze({
+  voice: "jarvis",
+  customVoiceId: "",
 });
 
 const windowModes = Object.freeze({
@@ -90,6 +164,10 @@ let windowMode = "panel";
 let windowFadeTimer = null;
 let windowFadeResolve = null;
 let activeComputerUseController = null;
+let mobileBridgeServer = null;
+let mobileBridgeHost = "127.0.0.1";
+let mobileDevServerProcess = null;
+let mobileDevServerPort = null;
 // User-chosen window position (set by dragging the panel), persisted across
 // launches. Only the draggable main panel honors it; transient call/orb modes
 // keep their anchored placement.
@@ -338,10 +416,7 @@ ipcMain.handle("update:check", async () => {
   return "Update check started.";
 });
 
-ipcMain.handle("openai:get-status", async () => {
-  const credentials = await getFreshOpenAICredentials();
-  return credentials ? credentialsToStatus(credentials) : { connected: false };
-});
+ipcMain.handle("openai:get-status", () => getOpenAIStatus());
 
 ipcMain.handle("openai:login", async () => {
   const credentials = await loginOpenAI();
@@ -353,22 +428,21 @@ ipcMain.handle("openai:logout", async () => {
   return { connected: false };
 });
 
-ipcMain.handle("openai:create-realtime-secret", async (_event, options = {}) => {
-  const credentials = await getFreshOpenAICredentials();
-  if (!credentials) {
-    throw new Error("Sign in to OpenAI before starting Realtime.");
-  }
-
-  return createRealtimeClientSecret(credentials, {
-    ...options,
-    instructions: buildRealtimeInstructions({ profile: loadAgentProfile() }),
-  });
-});
+ipcMain.handle("openai:create-realtime-secret", async (_event, options = {}) =>
+  createRealtimeSecret(options),
+);
 
 ipcMain.handle("agent:get-profile", () => loadAgentProfile());
 ipcMain.handle("agent:set-profile", (_event, profile) => saveAgentProfile(profile));
+ipcMain.handle("memory:get-overview", () => getMemoryOverview());
+ipcMain.handle("memory:delete-daily-log", (_event, id) => deleteDailyLog(id));
 ipcMain.handle("audio:get-microphone", () => loadMicrophoneDeviceId());
 ipcMain.handle("audio:set-microphone", (_event, deviceId) => saveMicrophoneDeviceId(deviceId));
+ipcMain.handle("settings:get", async () => ({
+  settings: await loadSettings(),
+  voices: realtimeVoiceOptions,
+}));
+ipcMain.handle("settings:update", async (_event, updates = {}) => saveSettings(updates));
 
 ipcMain.handle("planner:list-tasks", () => listTasks());
 ipcMain.handle("planner:list-calendar", () => listCalendarItems());
@@ -408,7 +482,82 @@ ipcMain.handle("diagnostics:write", async (_event, event, details = {}) => {
 });
 ipcMain.handle("diagnostics:privacy", async () => collectPrivacyDiagnostics());
 ipcMain.handle("tools:get-definitions", () => getRealtimeToolDefinitions());
-ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
+ipcMain.handle("tools:execute", async (_event, name, args = {}) => executeToolRequest(name, args));
+
+ipcMain.handle("mobile:get-status", () => getMobileBridgeStatus());
+ipcMain.handle("mobile:start-pairing", async () => {
+  await restartMobileBridgeForPairing();
+  await startMobileDevServer();
+  createPairingSession();
+  return getMobileBridgeStatus();
+});
+ipcMain.handle("mobile:get-pairing-qr", async () => createMobilePairingQrPayload());
+ipcMain.handle("mobile:stop-pairing", () => {
+  clearPairingSession();
+  return getMobileBridgeStatus();
+});
+ipcMain.handle("mobile:list-devices", () => listMobileDevices(getDatabasePath()));
+ipcMain.handle("mobile:delete-device", (_event, deviceId) => {
+  deleteMobileDevice(deviceId, getDatabasePath());
+  return getMobileBridgeStatus();
+});
+
+ipcMain.handle("tools:cancel-computer-use", () => cancelComputerUse());
+
+async function getOpenAIStatus() {
+  const credentials = await getFreshOpenAICredentials();
+  return credentials ? credentialsToStatus(credentials) : { connected: false };
+}
+
+async function createRealtimeSecret(options = {}) {
+  const credentials = await getFreshOpenAICredentials();
+  if (!credentials) {
+    throw new Error("Sign in to OpenAI before starting Realtime.");
+  }
+  const settings = await loadSettings();
+  const realtimeSettings = resolveRealtimeSettings(settings);
+
+  return createRealtimeClientSecret(credentials, {
+    ...options,
+    voice: realtimeSettings.voice,
+    speed: realtimeSettings.speed,
+    instructions: buildRealtimeInstructions({
+      memoryContext: buildMemoryContext(),
+      profile: loadAgentProfile(),
+      voiceStyle: realtimeSettings.instructions,
+    }),
+  });
+}
+
+async function handleMobileAssistantMessage(message, history = []) {
+  if (typeof message !== "string" || !message.trim()) {
+    throw new Error("Message is required.");
+  }
+  const credentials = await getFreshOpenAICredentials();
+  if (!credentials) {
+    throw new Error("Connect OpenAI on desktop before chatting from mobile.");
+  }
+  const startedAt = Date.now();
+  await writeDiagnosticLog("mobile.assistant.start", {
+    message: message.slice(0, 500),
+  });
+  try {
+    const reply = await runMobileAssistantResponse(credentials, message.trim(), history);
+    await writeDiagnosticLog("mobile.assistant.finish", {
+      elapsedMs: Date.now() - startedAt,
+      reply: reply.slice(0, 500),
+    });
+    return { reply };
+  } catch (error) {
+    await writeDiagnosticLog("mobile.assistant.error", {
+      elapsedMs: Date.now() - startedAt,
+      error: formatDiagnosticError(error),
+    });
+    throw error;
+  }
+}
+
+async function executeToolRequest(name, args = {}) {
   if (typeof name !== "string" || !name.trim()) {
     return {
       status: "invalid_arguments",
@@ -431,7 +580,9 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
     const credentials = isComputerUse ? await getFreshOpenAICredentials() : null;
     const screenshotOptions = {
       desktopCapturer,
+      nativeImage,
       screen,
+      systemPreferences,
       userDataPath: app.getPath("userData"),
       logger: createToolLogger(name),
       ...(credentials ? { openAI: { accessToken: credentials.accessToken } } : {}),
@@ -450,12 +601,17 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
         originator: "ggcoder",
         logger: createToolLogger(name),
         desktopCapturer,
+        nativeImage,
         screen,
+        systemPreferences,
         ensureOsControlAllowed,
         signal: abortController?.signal,
       },
       session: {
         cancelComputerUse,
+      },
+      memory: {
+        storePath: getDatabasePath(),
       },
       fileSystem: {
         rootPath: app.getPath("home"),
@@ -484,9 +640,7 @@ ipcMain.handle("tools:execute", async (_event, name, args = {}) => {
       activeComputerUseController = null;
     }
   }
-});
-
-ipcMain.handle("tools:cancel-computer-use", () => cancelComputerUse());
+}
 
 function cancelComputerUse() {
   if (activeComputerUseController) {
@@ -496,8 +650,9 @@ function cancelComputerUse() {
   return { cancelled: false };
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   initializeDataStore();
+  await startMobileBridgeForSavedDevices();
   void startDiagnosticSession();
   wireUpdateEvents();
   createMainWindow();
@@ -519,11 +674,261 @@ app.whenReady().then(() => {
   });
 });
 
+app.on("before-quit", () => {
+  clearPairingSession();
+  stopMobileDevServer();
+  void stopMobileBridge();
+});
+
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
 });
+
+async function startMobileBridge(host = "127.0.0.1") {
+  if (mobileBridgeServer && mobileBridgeHost === host) {
+    return mobileBridgeServer.getStatus();
+  }
+  if (mobileBridgeServer) {
+    await stopMobileBridge();
+  }
+  mobileBridgeHost = host;
+  mobileBridgeServer = createMobileBridgeServer({
+    host,
+    port: 19455,
+    pairingStorePath: getDatabasePath(),
+    handlers: {
+      getOpenAIStatus,
+      createRealtimeSecret,
+      getRealtimeTools: getRealtimeToolDefinitions,
+      executeRealtimeTool: executeToolRequest,
+      sendAssistantMessage: handleMobileAssistantMessage,
+    },
+    logger: {
+      info: (message, details) => safeConsole("info", message, details),
+      warn: (message, details) => safeConsole("warn", message, details),
+      error: (message, details) => safeConsole("error", message, details),
+    },
+  });
+  try {
+    return await mobileBridgeServer.start();
+  } catch (error) {
+    safeConsole("warn", "Failed to start mobile bridge", error);
+    mobileBridgeServer = null;
+    mobileBridgeHost = "127.0.0.1";
+    return getMobileBridgeStatus();
+  }
+}
+
+async function startMobileBridgeForSavedDevices() {
+  const devices = listMobileDevices(getDatabasePath());
+  const lanHost = devices.length > 0 ? getLanHostAddress() : null;
+  return startMobileBridge(lanHost ?? "127.0.0.1");
+}
+
+async function restartMobileBridgeForPairing() {
+  const lanHost = getLanHostAddress();
+  return startMobileBridge(lanHost ?? "127.0.0.1");
+}
+
+async function startMobileDevServer() {
+  if (mobileDevServerProcess && !mobileDevServerProcess.killed) {
+    return;
+  }
+  const mobileProjectPath = path.join(__dirname, "..", "mobile", "brah-mobile");
+  if (!existsSync(mobileProjectPath)) {
+    safeConsole("warn", "Mobile project not found", { mobileProjectPath });
+    mobileDevServerPort = null;
+    return;
+  }
+  const port = await getAvailableMobileDevServerPort();
+  mobileDevServerPort = port;
+  mobileDevServerProcess = spawn(
+    "npm",
+    ["run", "start", "--", "--host", "lan", "--port", String(port)],
+    {
+      cwd: mobileProjectPath,
+      stdio: "ignore",
+      detached: false,
+    },
+  );
+  mobileDevServerProcess.on("error", (error) => {
+    mobileDevServerPort = null;
+    safeConsole("warn", "Failed to start mobile dev server", error);
+  });
+  mobileDevServerProcess.on("exit", () => {
+    mobileDevServerProcess = null;
+    mobileDevServerPort = null;
+  });
+}
+
+async function getAvailableMobileDevServerPort() {
+  for (let port = 8081; port <= 8090; port += 1) {
+    if (!(await isLocalPortOpen(port))) {
+      return port;
+    }
+  }
+  return 8081;
+}
+
+function isLocalPortOpen(port) {
+  return new Promise((resolve) => {
+    const request = http.request(
+      { host: "127.0.0.1", port, method: "HEAD", timeout: 500 },
+      (response) => {
+        response.resume();
+        resolve(true);
+      },
+    );
+    request.on("error", () => resolve(false));
+    request.on("timeout", () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.end();
+  });
+}
+
+function stopMobileDevServer() {
+  if (!mobileDevServerProcess || mobileDevServerProcess.killed) {
+    mobileDevServerPort = null;
+    return;
+  }
+  mobileDevServerProcess.kill();
+  mobileDevServerProcess = null;
+  mobileDevServerPort = null;
+}
+
+async function stopMobileBridge() {
+  if (!mobileBridgeServer) {
+    return getMobileBridgeStatus();
+  }
+  const server = mobileBridgeServer;
+  mobileBridgeServer = null;
+  const status = await server.stop();
+  mobileBridgeHost = "127.0.0.1";
+  return status;
+}
+
+function getMobileBridgeStatus() {
+  const status = mobileBridgeServer?.getStatus() ?? {
+    running: false,
+    host: mobileBridgeHost,
+    port: 19455,
+    pairing: formatPairingStatus(getPairingSession()),
+    clients: 0,
+  };
+  const pairingPayload = createMobilePairingPayload(status);
+  return {
+    ...status,
+    pairing: formatPairingStatus(getPairingSession()),
+    pairingPayload,
+    pairingDeepLink: createMobilePairingDeepLink(pairingPayload),
+    expoUrl: createMobileExpoUrl(status.host, pairingPayload),
+    mobileDevServerPort,
+    lanHost: getLanHostAddress(),
+    devices: listMobileDevices(getDatabasePath()),
+  };
+}
+
+async function createMobilePairingQrPayload() {
+  const status = getMobileBridgeStatus();
+  const pairingPayload = status.pairingPayload;
+  const pairingDeepLink = createMobilePairingDeepLink(pairingPayload);
+  const qrDataUrl = pairingPayload
+    ? await QRCode.toDataURL(JSON.stringify(pairingPayload), {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 256,
+      })
+    : null;
+  const expoQrDataUrl = status.expoUrl
+    ? await QRCode.toDataURL(status.expoUrl, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 256,
+      })
+    : null;
+  return {
+    pairingPayload,
+    pairingDeepLink,
+    pairingQrDataUrl: qrDataUrl,
+    expoUrl: status.expoUrl,
+    expoQrDataUrl,
+  };
+}
+
+function createMobilePairingPayload(status) {
+  const pairing = status?.pairing ?? formatPairingStatus(getPairingSession());
+  if (!pairing.active || !pairing.code) {
+    return null;
+  }
+  return {
+    type: "brah.mobile.pairing",
+    version: 1,
+    host: status.host,
+    port: status.port,
+    pairingCode: pairing.code,
+    expiresAt: pairing.expiresAt,
+  };
+}
+
+function createMobilePairingDeepLink(pairingPayload) {
+  if (!pairingPayload) {
+    return null;
+  }
+  const params = new URLSearchParams({
+    host: pairingPayload.host,
+    port: String(pairingPayload.port),
+    pairingCode: pairingPayload.pairingCode,
+    expiresAt: String(pairingPayload.expiresAt),
+  });
+  return `brahmobile://pair?${params.toString()}`;
+}
+
+function createMobileExpoUrl(host, pairingPayload) {
+  if (typeof host !== "string" || host === "127.0.0.1" || !mobileDevServerPort || !pairingPayload) {
+    return null;
+  }
+  const params = new URLSearchParams({
+    type: pairingPayload.type,
+    version: String(pairingPayload.version),
+    host: pairingPayload.host,
+    port: String(pairingPayload.port),
+    pairingCode: pairingPayload.pairingCode,
+    expiresAt: String(pairingPayload.expiresAt),
+    autoPair: "1",
+  });
+  return `exp://${host}:${mobileDevServerPort}/--/pair?${params.toString()}`;
+}
+
+function getLanHostAddress() {
+  const interfaces = os.networkInterfaces();
+  const candidates = [];
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries ?? []) {
+      if (entry.family === "IPv4" && !entry.internal && entry.address) {
+        candidates.push(entry.address);
+      }
+    }
+  }
+  return candidates.find((address) => address.startsWith("192.168.")) ?? candidates[0] ?? null;
+}
+
+function formatPairingStatus(session) {
+  return session
+    ? {
+        active: true,
+        code: session.code,
+        expiresAt: session.expiresAt,
+      }
+    : {
+        active: false,
+        code: null,
+        expiresAt: null,
+      };
+}
 
 function initializeDataStore() {
   setDatabaseUserDataPath(app.getPath("userData"));
@@ -553,6 +958,16 @@ function broadcastDataChanged(category) {
 
 function categoryForTool(name) {
   switch (name) {
+    case "remember":
+    case "forget":
+    case "list_facts":
+    case "memory_search":
+    case "daily_log":
+    case "soul_set":
+    case "soul_get":
+    case "soul_list":
+    case "soul_delete":
+      return "memory";
     case "add_task":
     case "delete_task":
     case "update_task_status":
@@ -1092,6 +1507,255 @@ async function postOpenAIForm(body, label) {
   return parseJsonResponse(response, label);
 }
 
+async function runMobileAssistantResponse(credentials, message, history = []) {
+  const clientSecret = await createRealtimeClientSecret(credentials, {
+    instructions: buildMobileAssistantInstructions(),
+  });
+  const session = createMobileRealtimeSession(clientSecret);
+  try {
+    await session.connect();
+    await session.update({
+      instructions: buildMobileAssistantInstructions(),
+      tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
+      tool_choice: "auto",
+      output_modalities: ["text"],
+    });
+    const input = [
+      ...normalizeMobileAssistantHistory(history),
+      createMobileAssistantUserMessage(message),
+    ];
+
+    for (let round = 0; round < mobileAssistantDefaults.maxToolRounds; round += 1) {
+      const response = await session.createTextResponse(input);
+      const calls = getRealtimeFunctionCalls(response);
+      if (calls.length === 0) {
+        return extractRealtimeResponseText(response) || "Done.";
+      }
+      for (const call of calls) {
+        const result = await executeMobileAssistantTool(call);
+        await session.sendEvent({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: call.call_id,
+            output: JSON.stringify(result),
+          },
+        });
+      }
+      input.length = 0;
+    }
+
+    return "I ran several tool steps, but need you to narrow that down before I continue.";
+  } finally {
+    session.close();
+  }
+}
+
+function createMobileRealtimeSession(clientSecret) {
+  const socket = new WebSocket(
+    `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(realtimeDefaults.model)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${clientSecret.value}`,
+      },
+      perMessageDeflate: false,
+    },
+  );
+  const pendingResponses = [];
+  let pendingSessionUpdate = null;
+  let connected = false;
+  let closed = false;
+
+  socket.on("message", (data) => {
+    let event;
+    try {
+      event = JSON.parse(data.toString("utf8"));
+    } catch {
+      return;
+    }
+    handleMobileRealtimeEvent(event);
+  });
+  socket.on("error", (error) => {
+    rejectPendingMobileRealtime(error);
+  });
+  socket.on("close", () => {
+    closed = true;
+    rejectPendingMobileRealtime(new Error("Realtime session closed."));
+  });
+
+  function handleMobileRealtimeEvent(event) {
+    if (event?.type === "session.updated" && pendingSessionUpdate) {
+      pendingSessionUpdate.resolve(event.session);
+      pendingSessionUpdate = null;
+      return;
+    }
+    if (event?.type === "response.done") {
+      const pending = pendingResponses.shift();
+      pending?.resolve(event.response);
+      return;
+    }
+    if (event?.type === "error") {
+      const error = new Error(event.error?.message || "Realtime session error.");
+      if (event.error?.code) {
+        error.code = event.error.code;
+      }
+      rejectPendingMobileRealtime(error);
+    }
+  }
+
+  function rejectPendingMobileRealtime(error) {
+    if (pendingSessionUpdate) {
+      pendingSessionUpdate.reject(error);
+      pendingSessionUpdate = null;
+    }
+    while (pendingResponses.length > 0) {
+      pendingResponses.shift().reject(error);
+    }
+  }
+
+  function sendEvent(event) {
+    if (closed || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("Realtime session is not connected.");
+    }
+    socket.send(JSON.stringify(event));
+  }
+
+  return {
+    async connect() {
+      if (connected) {
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          reject(new Error("Realtime session connection timed out."));
+          socket.close();
+        }, 15_000);
+        socket.once("open", () => {
+          clearTimeout(timeoutId);
+          connected = true;
+          resolve();
+        });
+        socket.once("error", (error) => {
+          clearTimeout(timeoutId);
+          reject(error);
+        });
+      });
+    },
+    update(sessionUpdate) {
+      if (pendingSessionUpdate) {
+        throw new Error("Realtime session update already pending.");
+      }
+      return new Promise((resolve, reject) => {
+        pendingSessionUpdate = { resolve, reject };
+        sendEvent({
+          type: "session.update",
+          session: {
+            type: "realtime",
+            ...sessionUpdate,
+          },
+        });
+      });
+    },
+    createTextResponse(input = []) {
+      for (const item of input) {
+        sendEvent({ type: "conversation.item.create", item });
+      }
+      return new Promise((resolve, reject) => {
+        pendingResponses.push({ resolve, reject });
+        sendEvent({
+          type: "response.create",
+          response: {
+            output_modalities: ["text"],
+          },
+        });
+      });
+    },
+    sendEvent(event) {
+      sendEvent(event);
+    },
+    close() {
+      socket.close();
+    },
+  };
+}
+
+async function executeMobileAssistantTool(call) {
+  const toolName = typeof call.name === "string" ? call.name : "";
+  if (!toolName || toolName === "end_call") {
+    return { status: "refused", message: "That tool is not available from mobile chat." };
+  }
+  let args = {};
+  try {
+    args = call.arguments ? JSON.parse(call.arguments) : {};
+  } catch {
+    return { status: "invalid_arguments", message: "Tool arguments were not valid JSON." };
+  }
+  return executeToolRequest(toolName, args);
+}
+
+function buildMobileAssistantInstructions() {
+  return buildRealtimeInstructions({
+    memoryContext: buildMemoryContext(),
+    profile: loadAgentProfile(),
+    voiceStyle:
+      "You are being used from Greg's phone in text chat. Reply in concise mobile-friendly text. Use tools when useful. Do not call end_call.",
+  });
+}
+
+function normalizeMobileAssistantHistory(history) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+  return history
+    .filter((item) => item?.role === "user" || item?.role === "assistant")
+    .map((item) => createMobileAssistantMessage(item.role, item.text))
+    .filter(Boolean)
+    .slice(-12);
+}
+
+function createMobileAssistantUserMessage(message) {
+  return createMobileAssistantMessage("user", message);
+}
+
+function createMobileAssistantMessage(role, text) {
+  const trimmed = String(text ?? "")
+    .trim()
+    .slice(0, 2000);
+  if (!trimmed) {
+    return null;
+  }
+  return {
+    type: "message",
+    role,
+    content: [
+      {
+        type: role === "assistant" ? "output_text" : "input_text",
+        text: trimmed,
+      },
+    ],
+  };
+}
+
+function getRealtimeFunctionCalls(response) {
+  return (Array.isArray(response?.output) ? response.output : []).filter(
+    (item) => item?.type === "function_call" && item.status !== "incomplete",
+  );
+}
+
+function extractRealtimeResponseText(response) {
+  const chunks = [];
+  for (const item of Array.isArray(response?.output) ? response.output : []) {
+    for (const content of Array.isArray(item?.content) ? item.content : []) {
+      if (typeof content?.text === "string") {
+        chunks.push(content.text);
+      } else if (typeof content?.transcript === "string") {
+        chunks.push(content.transcript);
+      }
+    }
+  }
+  return chunks.join("\n").trim();
+}
+
 async function createRealtimeClientSecret(credentials, options) {
   const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
@@ -1116,11 +1780,12 @@ async function createRealtimeClientSecret(credentials, options) {
 
 function buildRealtimeSessionConfig(options) {
   const model = typeof options.model === "string" ? options.model : realtimeDefaults.model;
-  const voice = typeof options.voice === "string" ? options.voice : realtimeDefaults.voice;
+  const voice = normalizeRealtimeVoice(options.voice);
+  const speed = normalizeRealtimeSpeed(options.speed);
   const instructions =
     typeof options.instructions === "string" && options.instructions.trim()
       ? options.instructions.trim()
-      : buildRealtimeInstructions();
+      : buildRealtimeInstructions({ memoryContext: buildMemoryContext() });
 
   return {
     type: "realtime",
@@ -1142,7 +1807,7 @@ function buildRealtimeSessionConfig(options) {
       output: {
         format: { type: "audio/pcm", rate: realtimeDefaults.sampleRate },
         voice,
-        speed: 1.0,
+        speed,
       },
     },
     max_output_tokens: 4096,
@@ -1151,6 +1816,23 @@ function buildRealtimeSessionConfig(options) {
     tool_choice: "auto",
     tracing: "auto",
   };
+}
+
+function normalizeRealtimeVoice(value) {
+  if (typeof value !== "string") {
+    return realtimeDefaults.voice;
+  }
+  const trimmed = value.trim();
+  if (realtimeBuiltInVoiceIds.has(trimmed) || /^voice_[a-zA-Z0-9_-]{3,120}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return realtimeDefaults.voice;
+}
+
+function normalizeRealtimeSpeed(value) {
+  return typeof value === "number" && value >= 0.25 && value <= 1.5
+    ? value
+    : realtimeDefaults.speed;
 }
 
 async function parseJsonResponse(response, label) {
@@ -1164,6 +1846,76 @@ async function parseJsonResponse(response, label) {
   } catch {
     throw new Error(`${label} returned invalid JSON.`);
   }
+}
+
+async function loadSettings() {
+  try {
+    const raw = await fs.readFile(settingsPath(), "utf8");
+    return normalizeSettings(JSON.parse(raw));
+  } catch {
+    return { ...defaultSettings };
+  }
+}
+
+async function saveSettings(updates) {
+  const settings = normalizeSettings({
+    ...(await loadSettings()),
+    ...(isRecord(updates) ? updates : {}),
+  });
+  await fs.mkdir(path.dirname(settingsPath()), { recursive: true });
+  await fs.writeFile(settingsPath(), JSON.stringify(settings, null, 2), { mode: 0o600 });
+  return settings;
+}
+
+function normalizeSettings(value) {
+  const voice =
+    isRecord(value) && realtimeVoiceIds.has(value.voice) ? value.voice : defaultSettings.voice;
+  const customVoiceId =
+    isRecord(value) && typeof value.customVoiceId === "string"
+      ? normalizeCustomVoiceId(value.customVoiceId)
+      : defaultSettings.customVoiceId;
+  return { voice, customVoiceId };
+}
+
+function resolveRealtimeSettings(settings) {
+  if (settings.voice === customVoiceOption.id) {
+    return settings.customVoiceId
+      ? {
+          voice: settings.customVoiceId,
+          speed: realtimeDefaults.speed,
+          instructions: "",
+        }
+      : resolveRealtimeSettings(defaultSettings);
+  }
+  const preset = realtimeVoicePresets.find((voice) => voice.id === settings.voice);
+  if (preset) {
+    return {
+      voice: preset.voice,
+      speed: preset.speed,
+      instructions: preset.instructions,
+    };
+  }
+  if (realtimeBuiltInVoiceIds.has(settings.voice)) {
+    return {
+      voice: settings.voice,
+      speed: realtimeDefaults.speed,
+      instructions: "",
+    };
+  }
+  return {
+    voice: realtimeDefaults.voice,
+    speed: realtimeDefaults.speed,
+    instructions: "",
+  };
+}
+
+function normalizeCustomVoiceId(value) {
+  const trimmed = value.trim();
+  return /^[a-zA-Z0-9_-]{3,120}$/.test(trimmed) ? trimmed : "";
+}
+
+function settingsPath() {
+  return path.join(app.getPath("userData"), "settings.json");
 }
 
 async function getFreshOpenAICredentials() {

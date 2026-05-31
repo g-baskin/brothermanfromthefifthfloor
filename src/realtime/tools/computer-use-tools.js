@@ -72,7 +72,9 @@ export async function runComputerUseTask(args = {}, options = {}) {
     computerTarget = await targetFactory({
       ...validation.value,
       desktopCapturer: options.desktopCapturer,
+      nativeImage: options.nativeImage,
       screen: options.screen,
+      systemPreferences: options.systemPreferences,
       nut: options.nut,
       logger: options.logger,
     });

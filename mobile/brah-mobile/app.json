@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Brah Mobile",
+    "slug": "brah-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "brahmobile",
+    "android": {
+      "package": "com.unstablemind.brahmobile",
+      "permissions": ["INTERNET", "CAMERA"]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Brah Mobile to scan the desktop pairing QR code."
+        }
+      ]
+    ],
+    "extra": {
+      "bridgeDefaultPort": 19455
+    }
+  }
+}
