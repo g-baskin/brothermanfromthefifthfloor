@@ -9,9 +9,12 @@ import {
   buildMemoryContext,
   forgetFact,
   getMemoryOverview,
+  listChatMemory,
   listFacts,
   listSoulAspects,
+  recordChatTurn,
   rememberFact,
+  searchChatMemory,
   searchFacts,
   setSoulAspect,
 } from "../src/realtime/tools/memory-store.js";
@@ -72,6 +75,67 @@ test("soul aspects upsert and are injected into memory context", async () => {
     assert.equal(aspects[0].content, "Be direct and own misses fast.");
     assert.match(buildMemoryContext(storePath), /## Soul/);
     assert.match(buildMemoryContext(storePath), /own misses fast/);
+  });
+});
+
+test("chat turns are saved, searchable, and injected into context", async () => {
+  await withMemoryDb((storePath) => {
+    recordChatTurn(
+      {
+        source: "mobile",
+        role: "user",
+        content: "Remind me that the Android bridge can see all monitors.",
+        createdAt: new Date("2026-05-30T15:00:00Z"),
+      },
+      storePath,
+    );
+    recordChatTurn(
+      {
+        source: "mobile",
+        role: "assistant",
+        content: "Got it — desktop Brah handles the screen tools.",
+        createdAt: new Date("2026-05-30T15:01:00Z"),
+      },
+      storePath,
+    );
+
+    assert.equal(listChatMemory({ limit: 10 }, storePath).length, 2);
+    assert.equal(searchChatMemory("monitors", {}, storePath)[0].role, "user");
+    const context = buildMemoryContext(storePath, new Date("2026-05-30T15:02:00Z"), {
+      chatQuery: "What did I say about monitors?",
+    });
+    assert.match(context, /Recent\/Recalled Chat Memory/);
+    assert.match(context, /Android bridge can see all monitors/);
+
+    const overview = getMemoryOverview(storePath, new Date("2026-05-30T15:02:00Z"));
+    assert.equal(overview.chatMemory.length, 2);
+    assert.ok(overview.usage.chatMemory.pct > 0);
+  });
+});
+
+test("chat turn retention is capped and chat context can be disabled", async () => {
+  await withMemoryDb((storePath) => {
+    for (let index = 0; index < 5; index += 1) {
+      recordChatTurn(
+        {
+          source: "mobile",
+          role: "user",
+          content: `Saved chat turn ${index}`,
+          createdAt: new Date(`2026-05-30T15:0${index}:00Z`),
+          retentionLimit: 3,
+        },
+        storePath,
+      );
+    }
+
+    assert.deepEqual(
+      listChatMemory({ limit: 10 }, storePath).map((turn) => turn.content),
+      ["Saved chat turn 4", "Saved chat turn 3", "Saved chat turn 2"],
+    );
+    assert.doesNotMatch(
+      buildMemoryContext(storePath, new Date(), { includeChatMemory: false }),
+      /Recent\/Recalled Chat Memory/,
+    );
   });
 });
 

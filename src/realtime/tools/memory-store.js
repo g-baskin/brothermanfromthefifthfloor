@@ -3,6 +3,8 @@ import { getDatabase, getDatabasePath } from "./database.js";
 export const FACTS_CHAR_BUDGET = 3000;
 export const SOUL_CHAR_BUDGET = 1500;
 export const DAILY_LOGS_CHAR_BUDGET = 2000;
+export const CHAT_MEMORY_CHAR_BUDGET = 2500;
+export const CHAT_MEMORY_DEFAULT_RETENTION = 400;
 
 export function getMemoryStorePath() {
   return getDatabasePath();
@@ -205,10 +207,66 @@ export function deleteDailyLog(id, storePath = getMemoryStorePath()) {
   return result.changes > 0;
 }
 
-export function buildMemoryContext(storePath = getMemoryStorePath(), now = new Date()) {
+export function recordChatTurn(input, storePath = getMemoryStorePath()) {
+  const turn = normalizeChatTurn(input);
+  const retentionLimit = normalizeChatMemoryRetentionLimit(input?.retentionLimit);
+  const db = getDatabase(storePath);
+  db.prepare("INSERT INTO chat_memory (source, role, content, created_at) VALUES (?, ?, ?, ?)").run(
+    turn.source,
+    turn.role,
+    turn.content,
+    turn.created_at,
+  );
+  pruneChatMemory(db, retentionLimit);
+  return turn;
+}
+
+export function listChatMemory({ limit = 20 } = {}, storePath = getMemoryStorePath()) {
+  const boundedLimit = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 20, 100));
+  const db = getDatabase(storePath);
+  return db
+    .prepare(
+      `SELECT id, source, role, content, created_at
+       FROM chat_memory
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(boundedLimit)
+    .map(normalizeChatMemoryRow);
+}
+
+export function searchChatMemory(query, { limit = 8 } = {}, storePath = getMemoryStorePath()) {
+  const words = Array.from(extractWords(String(query ?? ""))).slice(0, 8);
+  if (words.length === 0) {
+    return [];
+  }
+  const boundedLimit = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 8, 20));
+  const db = getDatabase(storePath);
+  const where = words.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
+  const params = words.map((word) => `%${escapeLike(word)}%`);
+  return db
+    .prepare(
+      `SELECT id, source, role, content, created_at
+       FROM chat_memory
+       WHERE ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(...params, boundedLimit)
+    .map(normalizeChatMemoryRow);
+}
+
+export function buildMemoryContext(
+  storePath = getMemoryStorePath(),
+  now = new Date(),
+  options = {},
+) {
   return [
     buildFactsContext(storePath),
     buildSoulContext(storePath),
+    options.includeChatMemory === false
+      ? ""
+      : buildChatMemoryContext(options.chatQuery ?? "", storePath),
     buildDailyLogsContext(storePath, now),
   ]
     .filter((section) => section.trim().length > 0)
@@ -290,6 +348,33 @@ export function buildSoulContext(storePath = getMemoryStorePath()) {
   return lines.join("\n");
 }
 
+export function buildChatMemoryContext(query = "", storePath = getMemoryStorePath()) {
+  const matches = searchChatMemory(query, { limit: 8 }, storePath);
+  const recent = listChatMemory({ limit: 8 }, storePath);
+  const byId = new Map();
+  for (const turn of [...matches, ...recent]) {
+    byId.set(turn.id, turn);
+  }
+  const turns = [...byId.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (turns.length === 0) {
+    return "";
+  }
+
+  const headerReserve = 100;
+  const contentBudget = CHAT_MEMORY_CHAR_BUDGET - headerReserve;
+  const lines = ["## Recent/Recalled Chat Memory"];
+  let usedChars = 0;
+  for (const turn of turns) {
+    const line = `- ${formatChatMemoryTime(turn.created_at)} ${turn.source} ${turn.role}: ${turn.content}`;
+    if (usedChars + line.length + 1 > contentBudget) {
+      break;
+    }
+    usedChars += line.length + 1;
+    lines.push(line);
+  }
+  return lines.length > 1 ? lines.join("\n") : "";
+}
+
 export function buildDailyLogsContext(
   storePath = getMemoryStorePath(),
   now = new Date(),
@@ -327,10 +412,12 @@ export function getMemoryOverview(storePath = getMemoryStorePath(), now = new Da
   return {
     facts: listFacts({}, storePath),
     soul: listSoulAspects(storePath),
+    chatMemory: listChatMemory({ limit: 20 }, storePath),
     dailyLogs: listDailyLogs({ days: 7 }, storePath, now),
     usage: {
       facts: getFactsUsage(storePath),
       soul: getSoulUsage(storePath),
+      chatMemory: getChatMemoryUsage(storePath),
       dailyLogs: getDailyLogsUsage(storePath, now),
     },
   };
@@ -349,6 +436,11 @@ export function getSoulUsage(storePath = getMemoryStorePath()) {
 export function getDailyLogsUsage(storePath = getMemoryStorePath(), now = new Date()) {
   const context = buildDailyLogsContext(storePath, now);
   return createUsage(context.length, DAILY_LOGS_CHAR_BUDGET);
+}
+
+export function getChatMemoryUsage(storePath = getMemoryStorePath()) {
+  const context = buildChatMemoryContext("", storePath);
+  return createUsage(context.length, CHAT_MEMORY_CHAR_BUDGET);
 }
 
 function getFactById(id, storePath) {
@@ -410,6 +502,29 @@ function normalizeDailyLogRow(row) {
     date: String(row.date),
     content: String(row.content),
     updated_at: String(row.updated_at),
+  };
+}
+
+function normalizeChatTurn(input) {
+  const source = normalizeOptionalString(input?.source, 40) || "chat";
+  const role = input?.role === "assistant" ? "assistant" : "user";
+  const content = normalizeRequiredString(input?.content, "content", 1, 2000);
+  const createdAt = input?.createdAt instanceof Date ? input.createdAt : new Date();
+  return {
+    source,
+    role,
+    content,
+    created_at: createdAt.toISOString(),
+  };
+}
+
+function normalizeChatMemoryRow(row) {
+  return {
+    id: Number(row.id),
+    source: String(row.source),
+    role: String(row.role),
+    content: String(row.content),
+    created_at: String(row.created_at),
   };
 }
 
@@ -508,4 +623,27 @@ function createUsage(usedChars, budgetChars) {
     budgetChars,
     pct: Math.round((usedChars / budgetChars) * 100),
   };
+}
+
+function pruneChatMemory(db, retentionLimit = CHAT_MEMORY_DEFAULT_RETENTION) {
+  db.prepare(
+    `DELETE FROM chat_memory
+     WHERE id NOT IN (
+       SELECT id FROM chat_memory ORDER BY created_at DESC, id DESC LIMIT ?
+     )`,
+  ).run(retentionLimit);
+}
+
+function normalizeChatMemoryRetentionLimit(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 && numeric <= 2000
+    ? numeric
+    : CHAT_MEMORY_DEFAULT_RETENTION;
+}
+
+function formatChatMemoryTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "unknown-time"
+    : date.toLocaleString("en-US", { dateStyle: "short", timeStyle: "short" });
 }

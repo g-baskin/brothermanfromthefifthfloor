@@ -107,6 +107,14 @@ function applySchema(db) {
       content TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ'))
     );
+    CREATE TABLE IF NOT EXISTS chat_memory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_memory_created ON chat_memory (created_at DESC, id DESC);
   `);
   addColumnIfMissing(db, "mobile_devices", "client_id", "TEXT");
   db.exec(

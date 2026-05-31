@@ -1006,6 +1006,19 @@ button {
   padding-top: 4px;
 }
 
+.settings-toggle-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.settings-checkbox {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
 .settings-label {
   font-size: 0.82rem;
   font-weight: 600;
@@ -1017,6 +1030,10 @@ button {
   color: var(--text-2);
   font-size: 0.7rem;
   line-height: 1.4;
+}
+
+.settings-toggle-field .settings-hint {
+  grid-column: 1 / -1;
 }
 
 .settings-select,

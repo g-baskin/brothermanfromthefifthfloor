@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("brah", {
   setAgentProfile: (profile) => ipcRenderer.invoke("agent:set-profile", profile),
   getMemoryOverview: () => ipcRenderer.invoke("memory:get-overview"),
   deleteDailyLog: (id) => ipcRenderer.invoke("memory:delete-daily-log", id),
+  recordChatTurn: (turn) => ipcRenderer.invoke("memory:record-chat-turn", turn),
   getMicrophoneDevice: () => ipcRenderer.invoke("audio:get-microphone"),
   setMicrophoneDevice: (deviceId) => ipcRenderer.invoke("audio:set-microphone", deviceId),
   getSettings: () => ipcRenderer.invoke("settings:get"),

@@ -28,6 +28,8 @@ const voiceSelectElement = document.querySelector("#voice-select");
 const customVoiceFieldElement = document.querySelector("#custom-voice-field");
 const customVoiceIdElement = document.querySelector("#custom-voice-id");
 const voiceDescriptionElement = document.querySelector("#voice-description");
+const chatMemoryEnabledElement = document.querySelector("#chat-memory-enabled");
+const chatMemoryRetentionElement = document.querySelector("#chat-memory-retention");
 const permissionsPanelElement = document.querySelector("#permissions-panel");
 const permissionsBackButton = document.querySelector("#permissions-back");
 const permissionsRefreshButton = document.querySelector("#permissions-refresh");
@@ -55,9 +57,11 @@ const memoryBackButton = document.querySelector("#memory-back");
 const memoryRefreshButton = document.querySelector("#memory-refresh");
 const memoryFactsElement = document.querySelector("#memory-facts");
 const memorySoulElement = document.querySelector("#memory-soul");
+const memoryChatElement = document.querySelector("#memory-chat");
 const memoryLogsElement = document.querySelector("#memory-logs");
 const memoryFactsUsageElement = document.querySelector("#memory-facts-usage");
 const memorySoulUsageElement = document.querySelector("#memory-soul-usage");
+const memoryChatUsageElement = document.querySelector("#memory-chat-usage");
 const memoryLogsUsageElement = document.querySelector("#memory-logs-usage");
 const agentToggleButton = document.querySelector("#agent-toggle");
 const agentPanelElement = document.querySelector("#agent-panel");
@@ -102,6 +106,7 @@ let selectedMicId = null;
 // echo it back and trigger a self-reply; this holds the safety-unmute timer.
 let welcomeMicGuardTimer = null;
 let voiceOptions = [];
+let chatMemoryRetentionOptions = [];
 let selectedMobileQr = "expo";
 let mobilePairingRefreshTimer = null;
 const realtimeToolHandler = createRealtimeToolHandler({
@@ -302,6 +307,9 @@ async function refreshOpenAIStatus() {
 async function refreshSettings() {
   const payload = await window.brah.getSettings();
   voiceOptions = Array.isArray(payload.voices) ? payload.voices : [];
+  chatMemoryRetentionOptions = Array.isArray(payload.chatMemoryRetentionOptions)
+    ? payload.chatMemoryRetentionOptions
+    : [50, 100, 200, 400, 800];
   renderSettings(payload.settings ?? {});
 }
 
@@ -318,7 +326,22 @@ function renderSettings(settings) {
   );
   customVoiceIdElement.value =
     typeof settings.customVoiceId === "string" ? settings.customVoiceId : "";
+  chatMemoryEnabledElement.checked = settings.chatMemoryEnabled !== false;
+  renderChatMemoryRetention(settings.chatMemoryRetention);
   renderVoiceDescription(selectedVoice);
+}
+
+function renderChatMemoryRetention(selectedRetention) {
+  const normalizedRetention = Number.isInteger(selectedRetention) ? selectedRetention : 400;
+  chatMemoryRetentionElement.replaceChildren(
+    ...chatMemoryRetentionOptions.map((count) => {
+      const option = document.createElement("option");
+      option.value = String(count);
+      option.textContent = `${count} turns`;
+      option.selected = count === normalizedRetention;
+      return option;
+    }),
+  );
 }
 
 function renderVoiceDescription(voiceId) {
@@ -343,6 +366,25 @@ async function saveVoiceSetting() {
   } finally {
     voiceSelectElement.disabled = false;
     customVoiceIdElement.disabled = false;
+  }
+}
+
+async function saveChatMemorySettings() {
+  chatMemoryEnabledElement.disabled = true;
+  chatMemoryRetentionElement.disabled = true;
+  try {
+    const settings = await window.brah.updateSettings({
+      chatMemoryEnabled: chatMemoryEnabledElement.checked,
+      chatMemoryRetention: Number.parseInt(chatMemoryRetentionElement.value, 10),
+    });
+    renderSettings(settings);
+    setStatus(settings.chatMemoryEnabled ? "Chat recall memory on" : "Chat recall memory off");
+  } catch (error) {
+    setStatus(`Chat memory save failed: ${error.message}`);
+    await refreshSettings();
+  } finally {
+    chatMemoryEnabledElement.disabled = false;
+    chatMemoryRetentionElement.disabled = false;
   }
 }
 
@@ -712,12 +754,15 @@ async function refreshMemoryOverview() {
 function renderMemoryOverview(overview) {
   const facts = Array.isArray(overview?.facts) ? overview.facts : [];
   const soul = Array.isArray(overview?.soul) ? overview.soul : [];
+  const chatMemory = Array.isArray(overview?.chatMemory) ? overview.chatMemory : [];
   const dailyLogs = Array.isArray(overview?.dailyLogs) ? overview.dailyLogs : [];
   renderMemoryUsage(memoryFactsUsageElement, overview?.usage?.facts);
   renderMemoryUsage(memorySoulUsageElement, overview?.usage?.soul);
+  renderMemoryUsage(memoryChatUsageElement, overview?.usage?.chatMemory);
   renderMemoryUsage(memoryLogsUsageElement, overview?.usage?.dailyLogs);
   renderFacts(facts);
   renderSoulAspects(soul);
+  renderChatMemory(chatMemory);
   renderDailyLogs(dailyLogs);
 }
 
@@ -754,6 +799,22 @@ function renderSoulAspects(aspects) {
         title: aspect.aspect,
         body: aspect.content,
         meta: `Updated ${formatMemoryDate(aspect.updated_at)}`,
+      }),
+    ),
+  );
+}
+
+function renderChatMemory(turns) {
+  if (turns.length === 0) {
+    renderMemoryEmpty(memoryChatElement, "No chat turns saved yet.");
+    return;
+  }
+  memoryChatElement.replaceChildren(
+    ...turns.map((turn) =>
+      createMemoryItem({
+        title: `${turn.source} · ${turn.role}`,
+        body: turn.content,
+        meta: `Saved ${formatMemoryDate(turn.created_at)}`,
       }),
     ),
   );
@@ -1001,6 +1062,7 @@ async function handleRealtimeEvent(event) {
     // The active response just ended; release the create we queued earlier.
     sendRealtimeDataChannelEvent(queuedCreate);
   }
+  recordRealtimeChatMemory(event);
   if (await realtimeToolHandler.handleEvent(event)) {
     return;
   }
@@ -1046,6 +1108,44 @@ async function handleRealtimeEvent(event) {
     setStatus(event.error?.message ?? "Realtime error");
     setMode("idle");
   }
+}
+
+function recordRealtimeChatMemory(event) {
+  const userTranscript = extractUserTranscript(event);
+  if (userTranscript) {
+    void window.brah.recordChatTurn({ source: "desktop", role: "user", content: userTranscript });
+  }
+  if (event.type === "response.done") {
+    const assistantText = extractAssistantResponseText(event.response);
+    if (assistantText) {
+      void window.brah.recordChatTurn({
+        source: "desktop",
+        role: "assistant",
+        content: assistantText,
+      });
+    }
+  }
+}
+
+function extractUserTranscript(event) {
+  if (event.type !== "conversation.item.input_audio_transcription.completed") {
+    return "";
+  }
+  return typeof event.transcript === "string" ? event.transcript.trim() : "";
+}
+
+function extractAssistantResponseText(response) {
+  const chunks = [];
+  for (const item of Array.isArray(response?.output) ? response.output : []) {
+    for (const content of Array.isArray(item?.content) ? item.content : []) {
+      if (typeof content?.transcript === "string") {
+        chunks.push(content.transcript);
+      } else if (typeof content?.text === "string") {
+        chunks.push(content.text);
+      }
+    }
+  }
+  return chunks.join("\n").trim();
 }
 
 function interruptAssistantPlayback() {
@@ -1618,6 +1718,12 @@ voiceSelectElement.addEventListener("change", () => {
 });
 customVoiceIdElement.addEventListener("change", () => {
   void saveVoiceSetting();
+});
+chatMemoryEnabledElement.addEventListener("change", () => {
+  void saveChatMemorySettings();
+});
+chatMemoryRetentionElement.addEventListener("change", () => {
+  void saveChatMemorySettings();
 });
 permissionsBackButton.addEventListener("click", () => {
   permissionsPanelElement.hidden = true;

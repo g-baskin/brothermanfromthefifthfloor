@@ -105,6 +105,16 @@
               <input id="custom-voice-id" class="settings-input" type="text" placeholder="voice_1234" autocomplete="off" spellcheck="false" />
             </label>
             <p id="voice-description" class="settings-description"></p>
+            <label class="settings-field settings-toggle-field" for="chat-memory-enabled">
+              <span class="settings-label">Chat recall memory</span>
+              <span class="settings-hint">Save mobile and desktop chat turns so Brah can recall them later.</span>
+              <input id="chat-memory-enabled" class="settings-checkbox" type="checkbox" />
+            </label>
+            <label class="settings-field" for="chat-memory-retention">
+              <span class="settings-label">Saved chat turns</span>
+              <span class="settings-hint">Caps stored chat memory. Higher values remember more but add more recall context.</span>
+              <select id="chat-memory-retention" class="settings-select"></select>
+            </label>
           </div>
         </section>
         <section
@@ -222,6 +232,14 @@
               </div>
               <p class="memory-hint">Lessons about how Brah should work with you, not facts about you.</p>
               <div id="memory-soul" class="memory-list"></div>
+            </article>
+            <article class="memory-card">
+              <div class="memory-card-header">
+                <h2>Chat recall</h2>
+                <span id="memory-chat-usage" class="memory-usage">0%</span>
+              </div>
+              <p class="memory-hint">Recent mobile/desktop chat turns Brah can recall next time.</p>
+              <div id="memory-chat" class="memory-list"></div>
             </article>
             <article class="memory-card">
               <div class="memory-card-header">

@@ -49,6 +49,7 @@ import {
   buildMemoryContext,
   deleteDailyLog,
   getMemoryOverview,
+  recordChatTurn,
 } from "./realtime/tools/memory-store.js";
 import {
   loadMicrophoneDeviceId,
@@ -148,9 +149,13 @@ const realtimeVoiceOptions = Object.freeze([
 const realtimeBuiltInVoiceIds = new Set(realtimeBuiltInVoiceOptions.map((voice) => voice.id));
 const realtimeVoiceIds = new Set(realtimeVoiceOptions.map((voice) => voice.id));
 
+const chatMemoryRetentionOptions = Object.freeze([50, 100, 200, 400, 800]);
+
 const defaultSettings = Object.freeze({
   voice: "jarvis",
   customVoiceId: "",
+  chatMemoryEnabled: true,
+  chatMemoryRetention: 400,
 });
 
 const windowModes = Object.freeze({
@@ -436,11 +441,13 @@ ipcMain.handle("agent:get-profile", () => loadAgentProfile());
 ipcMain.handle("agent:set-profile", (_event, profile) => saveAgentProfile(profile));
 ipcMain.handle("memory:get-overview", () => getMemoryOverview());
 ipcMain.handle("memory:delete-daily-log", (_event, id) => deleteDailyLog(id));
+ipcMain.handle("memory:record-chat-turn", (_event, turn) => recordAssistantChatTurn(turn));
 ipcMain.handle("audio:get-microphone", () => loadMicrophoneDeviceId());
 ipcMain.handle("audio:set-microphone", (_event, deviceId) => saveMicrophoneDeviceId(deviceId));
 ipcMain.handle("settings:get", async () => ({
   settings: await loadSettings(),
   voices: realtimeVoiceOptions,
+  chatMemoryRetentionOptions,
 }));
 ipcMain.handle("settings:update", async (_event, updates = {}) => saveSettings(updates));
 
@@ -522,7 +529,7 @@ async function createRealtimeSecret(options = {}) {
     voice: realtimeSettings.voice,
     speed: realtimeSettings.speed,
     instructions: buildRealtimeInstructions({
-      memoryContext: buildMemoryContext(),
+      memoryContext: buildMemoryContextFromSettings(await loadSettings()),
       profile: loadAgentProfile(),
       voiceStyle: realtimeSettings.instructions,
     }),
@@ -542,7 +549,10 @@ async function handleMobileAssistantMessage(message, history = []) {
     message: message.slice(0, 500),
   });
   try {
-    const reply = await runMobileAssistantResponse(credentials, message.trim(), history);
+    const trimmedMessage = message.trim();
+    void recordAssistantChatTurn({ role: "user", content: trimmedMessage, source: "mobile" });
+    const reply = await runMobileAssistantResponse(credentials, trimmedMessage, history);
+    void recordAssistantChatTurn({ role: "assistant", content: reply, source: "mobile" });
     await writeDiagnosticLog("mobile.assistant.finish", {
       elapsedMs: Date.now() - startedAt,
       reply: reply.slice(0, 500),
@@ -648,6 +658,23 @@ function cancelComputerUse() {
     return { cancelled: true };
   }
   return { cancelled: false };
+}
+
+async function recordAssistantChatTurn(turn) {
+  try {
+    const settings = await loadSettings();
+    if (!settings.chatMemoryEnabled) {
+      return { recorded: false, reason: "disabled" };
+    }
+    recordChatTurn({ ...turn, retentionLimit: settings.chatMemoryRetention }, getDatabasePath());
+    broadcastDataChanged("memory");
+    return { recorded: true };
+  } catch (error) {
+    void writeDiagnosticLog("memory.chat_turn.error", {
+      error: formatDiagnosticError(error),
+    });
+    return { recorded: false, reason: "error" };
+  }
 }
 
 app.whenReady().then(async () => {
@@ -1508,14 +1535,16 @@ async function postOpenAIForm(body, label) {
 }
 
 async function runMobileAssistantResponse(credentials, message, history = []) {
+  const settings = await loadSettings();
+  const instructions = buildMobileAssistantInstructions(message, settings);
   const clientSecret = await createRealtimeClientSecret(credentials, {
-    instructions: buildMobileAssistantInstructions(),
+    instructions,
   });
   const session = createMobileRealtimeSession(clientSecret);
   try {
     await session.connect();
     await session.update({
-      instructions: buildMobileAssistantInstructions(),
+      instructions,
       tools: getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call"),
       tool_choice: "auto",
       output_modalities: ["text"],
@@ -1693,9 +1722,9 @@ async function executeMobileAssistantTool(call) {
   return executeToolRequest(toolName, args);
 }
 
-function buildMobileAssistantInstructions() {
+function buildMobileAssistantInstructions(message = "", settings = defaultSettings) {
   return buildRealtimeInstructions({
-    memoryContext: buildMemoryContext(),
+    memoryContext: buildMemoryContextFromSettings(settings, message),
     profile: loadAgentProfile(),
     voiceStyle:
       "You are being used from Greg's phone in text chat. Reply in concise mobile-friendly text. Use tools when useful. Do not call end_call.",
@@ -1874,7 +1903,26 @@ function normalizeSettings(value) {
     isRecord(value) && typeof value.customVoiceId === "string"
       ? normalizeCustomVoiceId(value.customVoiceId)
       : defaultSettings.customVoiceId;
-  return { voice, customVoiceId };
+  const chatMemoryEnabled =
+    isRecord(value) && typeof value.chatMemoryEnabled === "boolean"
+      ? value.chatMemoryEnabled
+      : defaultSettings.chatMemoryEnabled;
+  const chatMemoryRetention = normalizeChatMemoryRetention(value?.chatMemoryRetention);
+  return { voice, customVoiceId, chatMemoryEnabled, chatMemoryRetention };
+}
+
+function buildMemoryContextFromSettings(settings = defaultSettings, chatQuery = "") {
+  return buildMemoryContext(getDatabasePath(), new Date(), {
+    chatQuery,
+    includeChatMemory: settings.chatMemoryEnabled,
+  });
+}
+
+function normalizeChatMemoryRetention(value) {
+  const numeric = Number(value);
+  return chatMemoryRetentionOptions.includes(numeric)
+    ? numeric
+    : defaultSettings.chatMemoryRetention;
 }
 
 function resolveRealtimeSettings(settings) {
