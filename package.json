@@ -14,8 +14,8 @@
     "lint": "biome lint .",
     "update:deps": "ncu -u && npm install",
     "test": "npm run check && node --test",
-    "build:mac": "electron-builder --mac dir",
-    "open:mac": "npm run build:mac && open dist/mac-arm64/Brah.app"
+    "build:mac": "node --env-file-if-exists=.env.local ./node_modules/electron-builder/out/cli/cli.js --config electron-builder.config.cjs --mac dir",
+    "open:mac": "npm run build:mac && open dist/mac/Brah.app"
   },
   "keywords": [
     "electron"

@@ -24,6 +24,7 @@ import WebSocket from "ws";
 import { createEncryptedTokenStore } from "./integrations/google/encrypted-token-store.js";
 import { createGoogleCalendarClient } from "./integrations/google/google-calendar-client.js";
 import { createGoogleOAuthClient } from "./integrations/google/google-oauth.js";
+import { resolveGoogleOAuthConfig } from "./integrations/google/google-runtime-config.js";
 import { createMobileBridgeServer } from "./mobile/bridge-server.js";
 import {
   clearPairingSession,
@@ -1129,13 +1130,24 @@ async function recordAssistantChatTurn(turn) {
 }
 
 function initializeGoogleCalendarIntegration() {
+  let packageMetadata = {};
+  try {
+    packageMetadata = require(path.join(app.getAppPath(), "package.json"));
+  } catch {
+    // Development and malformed packages fall back to environment configuration.
+  }
+  const oauthConfig = resolveGoogleOAuthConfig({ env: process.env, packageMetadata });
+  void writeDiagnosticLog("google_calendar.initialize", {
+    configured: Boolean(oauthConfig.clientId),
+    source: process.env.BRAH_GOOGLE_OAUTH_CLIENT_ID?.trim() ? "environment" : "package",
+  });
   const tokenStore = createEncryptedTokenStore({
     filePath: path.join(app.getPath("userData"), "google-calendar-credentials.json"),
     safeStorage,
   });
   googleCalendarOAuth = createGoogleOAuthClient({
-    clientId: process.env.BRAH_GOOGLE_OAUTH_CLIENT_ID?.trim() || "",
-    clientSecret: process.env.BRAH_GOOGLE_OAUTH_CLIENT_SECRET?.trim() || "",
+    clientId: oauthConfig.clientId,
+    clientSecret: oauthConfig.clientSecret,
     tokenStore,
     openExternal: (url) => shell.openExternal(url),
   });

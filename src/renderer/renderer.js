@@ -4,6 +4,7 @@ import {
   connectAndRefreshGoogleCalendar,
   createGoogleCalendarStatusView,
 } from "./google-calendar-status.js";
+import { acquireMicrophoneWithPermission } from "./microphone-access.js";
 import { createPanelController } from "./panel.js";
 import { createRealtimePlaybackTracker, isBenignCancelError } from "./realtime-playback.js";
 import {
@@ -989,11 +990,11 @@ async function startCall({ ongoing = false } = {}) {
       conversationId: currentConversationId,
       mode: currentConversationMode,
     });
-    await ensureMicrophoneAccess();
+
+    localStream = await acquireAuthorizedMicrophoneStream();
+    await writeRendererDiagnostic("call.microphone.stream", describeMediaStream(localStream));
     const secret = await window.brah.createRealtimeSecret({ ongoing });
     await writeRendererDiagnostic("call.secret.created", { hasValue: Boolean(secret?.value) });
-    localStream = await acquireMicrophoneStream();
-    await writeRendererDiagnostic("call.microphone.stream", describeMediaStream(localStream));
     startAudioLevelMonitor(localStream);
     void populateMicDevices();
 
@@ -1376,32 +1377,26 @@ function isRealAudioInputId(deviceId) {
   );
 }
 
-// A Chromium media track can appear live while macOS TCC still feeds it silence,
-// so require native microphone permission before creating the WebRTC session.
-async function ensureMicrophoneAccess() {
-  const permissions = await window.brah.getOsPermissions();
-  const microphone = permissions.find((permission) => permission.id === "microphone");
-  await writeRendererDiagnostic("call.microphone.permission", {
-    conversationId: currentConversationId,
-    status: microphone?.status ?? "missing",
+async function acquireAuthorizedMicrophoneStream() {
+  return acquireMicrophoneWithPermission({
+    getPermissions: () => window.brah.getOsPermissions(),
+    requestPermission: () => window.brah.requestOsPermission("microphone"),
+    acquireStream: acquireMicrophoneStream,
+    openSettings: () => window.brah.openOsPermissionSettings("microphone"),
+    onPrompt: () => setStatus("Allow microphone access…"),
+    onPermissionStatus: (status) =>
+      writeRendererDiagnostic("call.microphone.permission", {
+        conversationId: currentConversationId,
+        status,
+      }),
+    onPermissionResult: (status) =>
+      writeRendererDiagnostic("call.microphone.permission_result", {
+        conversationId: currentConversationId,
+        status,
+      }),
+    onAcquisitionError: (error) =>
+      writeRendererDiagnostic("call.microphone.acquire_failed", formatRendererError(error)),
   });
-  if (!microphone || microphone.status === "granted" || microphone.status === "unsupported") {
-    return;
-  }
-
-  setStatus("Allow microphone access…");
-  const updatedPermissions = await window.brah.requestOsPermission("microphone");
-  const updatedMicrophone = updatedPermissions.find((permission) => permission.id === "microphone");
-  await writeRendererDiagnostic("call.microphone.permission_result", {
-    conversationId: currentConversationId,
-    status: updatedMicrophone?.status ?? "missing",
-  });
-  if (updatedMicrophone?.status !== "granted") {
-    await window.brah.openOsPermissionSettings("microphone");
-    throw new Error(
-      "Microphone access is required. Allow Brah/Electron in System Settings → Privacy & Security → Microphone, then try again.",
-    );
-  }
 }
 
 // Acquires the mic with the chosen device + echo cancellation. If a pinned
