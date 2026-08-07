@@ -77,7 +77,10 @@ const agentPanelElement = document.querySelector("#agent-panel");
 const agentBackButton = document.querySelector("#agent-back");
 const agentFormElement = document.querySelector("#agent-form");
 const agentNameInput = document.querySelector("#agent-name");
+const agentAboutInput = document.querySelector("#agent-about");
 const agentGoalsInput = document.querySelector("#agent-goals");
+const agentResponsePreferencesInput = document.querySelector("#agent-response-preferences");
+const agentStandingInstructionsInput = document.querySelector("#agent-standing-instructions");
 const agentStatusElement = document.querySelector("#agent-status");
 const callToggleButton = document.querySelector("#call-toggle");
 const headerCallButton = document.querySelector("#header-call");
@@ -455,13 +458,19 @@ async function loadAgentProfile() {
 
 function renderAgentProfile() {
   agentNameInput.value = agentProfile.name;
+  agentAboutInput.value = agentProfile.about;
   agentGoalsInput.value = agentProfile.goals.join("\n");
+  agentResponsePreferencesInput.value = agentProfile.responsePreferences.join("\n");
+  agentStandingInstructionsInput.value = agentProfile.standingInstructions.join("\n");
 }
 
 async function saveAgentProfile() {
   const profile = {
-    name: agentNameInput.value,
+    about: agentAboutInput.value,
     goals: agentGoalsInput.value.split("\n"),
+    name: agentNameInput.value,
+    responsePreferences: agentResponsePreferencesInput.value.split("\n"),
+    standingInstructions: agentStandingInstructionsInput.value.split("\n"),
   };
   agentStatusElement.textContent = "Saving\u2026";
   try {

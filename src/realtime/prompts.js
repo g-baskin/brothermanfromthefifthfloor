@@ -39,9 +39,20 @@ You are LAD, Greg's fast, conversational voice companion inside a dark, minimal 
 - Only respond to clear speech.
 - If input is unclear, ask a quick clarification.`;
 
+export const AGENT_PROFILE_LIMITS = Object.freeze({
+  about: 2_000,
+  goals: Object.freeze({ items: 12, itemLength: 240 }),
+  name: 80,
+  responsePreferences: Object.freeze({ items: 12, itemLength: 240 }),
+  standingInstructions: Object.freeze({ items: 20, itemLength: 500 }),
+});
+
 export const DEFAULT_AGENT_PROFILE = Object.freeze({
-  goals: [],
+  about: "",
+  goals: Object.freeze([]),
   name: "Greg",
+  responsePreferences: Object.freeze([]),
+  standingInstructions: Object.freeze([]),
 });
 
 export function buildWelcomeInstructions(profile = DEFAULT_AGENT_PROFILE) {
@@ -58,20 +69,52 @@ export function buildAgentInstructions(profile = DEFAULT_AGENT_PROFILE) {
 
 export function buildAgentProfileInstructions(profile) {
   const normalized = normalizeAgentProfile(profile);
-  const lines = [];
+  const sections = [];
+
   if (normalized.name) {
-    lines.push(
-      `The user's name is ${normalized.name}. Refer to them by name naturally, not every turn.`,
+    sections.push(
+      [
+        "## Name",
+        `The user's name is ${normalized.name}. Refer to them by name naturally, not every turn.`,
+      ].join("\n"),
     );
   }
-  if (normalized.goals.length > 0) {
-    lines.push("The user's current goals are:");
-    for (const goal of normalized.goals) {
-      lines.push(`- ${goal}`);
-    }
-    lines.push("Use these goals to prioritize suggestions, reminders, and follow-up questions.");
+
+  if (normalized.about) {
+    sections.push(["## About the User", normalized.about].join("\n"));
   }
-  return lines.length > 0 ? `# Personal Context\n${lines.join("\n")}` : "";
+
+  if (normalized.goals.length > 0) {
+    sections.push(
+      [
+        "## Current Goals",
+        ...normalized.goals.map((goal) => `- ${goal}`),
+        "Use these goals to prioritize suggestions, reminders, and follow-up questions.",
+      ].join("\n"),
+    );
+  }
+
+  if (normalized.responsePreferences.length > 0) {
+    sections.push(
+      [
+        "## Response Preferences",
+        ...normalized.responsePreferences.map((preference) => `- ${preference}`),
+        "Apply these preferences when shaping responses.",
+      ].join("\n"),
+    );
+  }
+
+  if (normalized.standingInstructions.length > 0) {
+    sections.push(
+      [
+        "## Standing Instructions — Explicit User Rules",
+        "Treat every item below as an explicit rule from the user. Follow it unless it conflicts with higher-priority system, safety, or developer instructions.",
+        ...normalized.standingInstructions.map((instruction) => `- ${instruction}`),
+      ].join("\n"),
+    );
+  }
+
+  return sections.length > 0 ? `# User Profile\n\n${sections.join("\n\n")}` : "";
 }
 
 export function buildRuntimeInstructions(now = new Date()) {
@@ -115,8 +158,17 @@ export function buildRealtimeInstructions({
 
 export function normalizeAgentProfile(profile) {
   return {
-    goals: normalizeGoals(Array.isArray(profile?.goals) ? profile.goals : []),
-    name: typeof profile?.name === "string" ? profile.name.trim() : "",
+    about: normalizeMultilineText(profile?.about, AGENT_PROFILE_LIMITS.about),
+    goals: normalizeList(profile?.goals, AGENT_PROFILE_LIMITS.goals),
+    name: normalizeSingleLineText(profile?.name, AGENT_PROFILE_LIMITS.name),
+    responsePreferences: normalizeList(
+      profile?.responsePreferences,
+      AGENT_PROFILE_LIMITS.responsePreferences,
+    ),
+    standingInstructions: normalizeList(
+      profile?.standingInstructions,
+      AGENT_PROFILE_LIMITS.standingInstructions,
+    ),
   };
 }
 
@@ -129,16 +181,46 @@ function normalizeMemoryContext(memoryContext) {
   return trimmed.length > 0 ? `# Memory Context\n${trimmed}` : "";
 }
 
-function normalizeGoals(goals) {
-  const uniqueGoals = new Set();
-  for (const goal of goals) {
-    if (typeof goal !== "string") {
+function normalizeList(value, limits) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalizedItems = [];
+  const seenItems = new Set();
+  for (const item of value) {
+    const normalized = normalizeSingleLineText(item, limits.itemLength);
+    const deduplicationKey = normalized.toLocaleLowerCase();
+    if (!normalized || seenItems.has(deduplicationKey)) {
       continue;
     }
-    const trimmed = goal.trim();
-    if (trimmed.length > 0) {
-      uniqueGoals.add(trimmed);
+    seenItems.add(deduplicationKey);
+    normalizedItems.push(normalized);
+    if (normalizedItems.length === limits.items) {
+      break;
     }
   }
-  return [...uniqueGoals].slice(0, 12);
+  return normalizedItems;
+}
+
+function normalizeMultilineText(value, maxLength) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, maxLength)
+    .trimEnd();
+}
+
+function normalizeSingleLineText(value, maxLength) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim().slice(0, maxLength).trimEnd();
 }

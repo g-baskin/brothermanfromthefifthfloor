@@ -314,12 +314,43 @@
               />
             </label>
             <label class="agent-field">
+              <span class="agent-label">About you</span>
+              <textarea
+                id="agent-about"
+                class="agent-textarea"
+                rows="4"
+                placeholder="Background, interests, and useful context"
+                maxlength="2000"
+              ></textarea>
+            </label>
+            <label class="agent-field">
               <span class="agent-label">Your goals</span>
               <textarea
                 id="agent-goals"
                 class="agent-textarea"
                 rows="5"
                 placeholder="One goal per line"
+                maxlength="2892"
+              ></textarea>
+            </label>
+            <label class="agent-field">
+              <span class="agent-label">Response preferences</span>
+              <textarea
+                id="agent-response-preferences"
+                class="agent-textarea"
+                rows="4"
+                placeholder="One preference per line, e.g. keep answers concise"
+                maxlength="2892"
+              ></textarea>
+            </label>
+            <label class="agent-field">
+              <span class="agent-label">Standing instructions</span>
+              <textarea
+                id="agent-standing-instructions"
+                class="agent-textarea"
+                rows="5"
+                placeholder="One rule per line, e.g. ask before sending messages"
+                maxlength="10020"
               ></textarea>
             </label>
           </form>
