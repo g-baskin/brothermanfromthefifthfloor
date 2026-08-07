@@ -6,7 +6,9 @@ import {
   createPkcePair,
   exchangeAuthorizationCode,
   GOOGLE_CALENDAR_SCOPE,
+  GOOGLE_GMAIL_READONLY_SCOPE,
   GOOGLE_TOKEN_ENDPOINT,
+  GOOGLE_WORKSPACE_SCOPES,
 } from "../src/integrations/google/google-oauth.js";
 
 function tokenStore(initial = null) {
@@ -77,10 +79,14 @@ test("connect opens system authorization with state and PKCE then persists refre
   assert.deepEqual(await client.getStatus(), {
     state: "connected",
     connectedAt: "2026-08-06T12:00:00.000Z",
+    gmailConnected: true,
   });
-  assert.equal(authorizationUrl.searchParams.get("scope"), GOOGLE_CALENDAR_SCOPE);
+  assert.equal(authorizationUrl.searchParams.get("scope"), GOOGLE_WORKSPACE_SCOPES.join(" "));
+  assert.ok(authorizationUrl.searchParams.get("scope").includes(GOOGLE_CALENDAR_SCOPE));
+  assert.ok(authorizationUrl.searchParams.get("scope").includes(GOOGLE_GMAIL_READONLY_SCOPE));
   assert.equal(authorizationUrl.searchParams.get("access_type"), "offline");
-  assert.equal(authorizationUrl.searchParams.get("prompt"), "consent");
+  assert.equal(authorizationUrl.searchParams.get("prompt"), null);
+  assert.equal(authorizationUrl.searchParams.get("include_granted_scopes"), "true");
   assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256");
   assert.ok(authorizationUrl.searchParams.get("state"));
   assert.equal(tokenRequest.get("code"), "authorization-code");
@@ -88,6 +94,47 @@ test("connect opens system authorization with state and PKCE then persists refre
   assert.equal(tokenRequest.has("client_secret"), false);
   assert.equal(store.inspect().refreshToken, "refresh-token");
   assert.equal(await client.getAccessToken(), "access-token");
+});
+
+test("incremental authorization keeps the encrypted refresh token when Google omits a new one", async () => {
+  const existingRefreshToken = "existing-refresh-token";
+  const store = tokenStore({
+    refreshToken: existingRefreshToken,
+    metadata: {
+      connectedAt: "2026-08-01T00:00:00.000Z",
+      scope: GOOGLE_CALENDAR_SCOPE,
+    },
+  });
+  let authorizationUrl;
+  const client = createGoogleOAuthClient({
+    clientId: "desktop-client-id",
+    tokenStore: store,
+    openExternal: async (url) => {
+      authorizationUrl = new URL(url);
+      const callbackUrl = new URL(authorizationUrl.searchParams.get("redirect_uri"));
+      callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state"));
+      callbackUrl.searchParams.set("code", "incremental-authorization-code");
+      await fetch(callbackUrl);
+    },
+    fetchImpl: async () =>
+      jsonResponse({
+        access_token: "incremental-access-token",
+        expires_in: 3600,
+        scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
+      }),
+  });
+
+  await client.connect();
+
+  assert.equal(authorizationUrl.searchParams.get("prompt"), null);
+  assert.equal(authorizationUrl.searchParams.get("include_granted_scopes"), "true");
+  assert.equal(store.inspect().refreshToken, existingRefreshToken);
+  assert.equal(store.inspect().metadata.scope, GOOGLE_WORKSPACE_SCOPES.join(" "));
+  assert.deepEqual(await client.getStatus(), {
+    state: "connected",
+    connectedAt: store.inspect().metadata.connectedAt,
+    gmailConnected: true,
+  });
 });
 
 test("callback receipt does not falsely confirm connection when token exchange fails", async () => {
@@ -226,6 +273,22 @@ test("access token refresh caches tokens and invalid_grant removes credentials",
     (error) => error.code === "integration_not_connected",
   );
   assert.equal(store.inspect(), null);
+});
+
+test("Gmail access requires reconnecting credentials created before the Gmail scope", async () => {
+  const client = createGoogleOAuthClient({
+    clientId: "desktop-client-id",
+    tokenStore: tokenStore({
+      refreshToken: "stored-refresh",
+      metadata: { scope: GOOGLE_CALENDAR_SCOPE },
+    }),
+    openExternal: async () => {},
+  });
+
+  await assert.rejects(
+    client.getAccessToken({ requiredScope: GOOGLE_GMAIL_READONLY_SCOPE }),
+    (error) => error.code === "gmail_permission_required",
+  );
 });
 
 test("missing client ID returns setup-specific status", async () => {

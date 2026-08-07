@@ -80,6 +80,7 @@ async function withToolHarness(callback) {
         computerTargetFactory: async () => createComputerHarness(),
       },
       googleCalendar: createGoogleCalendarHarness(),
+      gmail: createGmailHarness(),
       fileSystem: { rootPath: directory },
     });
   } finally {
@@ -101,6 +102,27 @@ function createGoogleCalendarHarness() {
     createEvent: async (args) => ({ ...event, ...args }),
     updateEvent: async (eventId, patch) => ({ ...event, ...patch, id: eventId }),
     deleteEvent: async (eventId) => ({ deleted: true, eventId }),
+  };
+}
+
+function createGmailHarness() {
+  const email = {
+    id: "gmail-message-1",
+    threadId: "gmail-thread-1",
+    from: "Alice <alice@example.com>",
+    to: "Greg <greg@example.com>",
+    subject: "Functional Gmail message",
+    snippet: "A Gmail message snippet.",
+    body: "A Gmail message body.",
+    labelIds: ["INBOX"],
+  };
+  return {
+    searchMessages: async () => ({
+      messages: [{ ...email, body: undefined }],
+      nextPageToken: null,
+      resultSizeEstimate: 1,
+    }),
+    getMessage: async (messageId) => ({ ...email, id: messageId }),
   };
 }
 
@@ -347,6 +369,24 @@ test("every registered Realtime tool executes a functional path", async () => {
     );
     observedNames.push("google_calendar_delete_event");
     assert.equal(result.status, "deleted");
+
+    result = await executeRealtimeTool(
+      "gmail_search_messages",
+      { query: "is:unread", maxResults: 5 },
+      options,
+    );
+    observedNames.push("gmail_search_messages");
+    assert.equal(result.status, "listed");
+    assert.equal(result.messages[0].id, "gmail-message-1");
+
+    result = await executeRealtimeTool(
+      "gmail_get_message",
+      { messageId: "gmail-message-1" },
+      options,
+    );
+    observedNames.push("gmail_get_message");
+    assert.equal(result.status, "retrieved");
+    assert.equal(result.email.body, "A Gmail message body.");
 
     result = await executeRealtimeTool(
       "web_search",

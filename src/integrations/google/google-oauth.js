@@ -5,6 +5,11 @@ export const GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oaut
 export const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 export const GOOGLE_REVOCATION_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 export const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.owned";
+export const GOOGLE_GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+export const GOOGLE_WORKSPACE_SCOPES = Object.freeze([
+  GOOGLE_CALENDAR_SCOPE,
+  GOOGLE_GMAIL_READONLY_SCOPE,
+]);
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_SKEW_MS = 60 * 1000;
@@ -32,7 +37,25 @@ export function createGoogleOAuthClient({
     if (typeof clientId !== "string" || !clientId.trim()) {
       throw oauthError(
         "integration_unconfigured",
-        "Google Calendar is not configured. Set BRAH_GOOGLE_OAUTH_CLIENT_ID.",
+        "Google Workspace is not configured. Set BRAH_GOOGLE_OAUTH_CLIENT_ID.",
+      );
+    }
+  }
+
+  async function assertRequiredScope(requiredScope) {
+    if (!requiredScope) return;
+    const stored = await tokenStore.load();
+    if (!stored) {
+      throw oauthError(
+        "integration_not_connected",
+        "Google is not connected. Connect Google Calendar + Gmail in Settings.",
+      );
+    }
+    const scopes = String(stored.metadata?.scope || "").split(/\s+/);
+    if (!scopes.includes(requiredScope)) {
+      throw oauthError(
+        "gmail_permission_required",
+        "Gmail access needs approval. Reconnect Google Calendar + Gmail in Settings.",
       );
     }
   }
@@ -45,10 +68,11 @@ export function createGoogleOAuthClient({
       if (!tokenStore.isEncryptionAvailable()) {
         throw oauthError(
           "secure_storage_unavailable",
-          "Secure credential storage is unavailable, so Google Calendar cannot connect.",
+          "Secure credential storage is unavailable, so Google Workspace cannot connect.",
         );
       }
 
+      const existingCredentials = await tokenStore.load();
       const state = randomBytes(32).toString("base64url");
       const { verifier, challenge } = createPkcePair();
       const callback = await waitForLoopbackCallback({ createServer, state, timeoutMs });
@@ -59,10 +83,10 @@ export function createGoogleOAuthClient({
         client_id: clientId,
         code_challenge: challenge,
         code_challenge_method: "S256",
-        prompt: "consent",
+        include_granted_scopes: "true",
         redirect_uri: redirectUri,
         response_type: "code",
-        scope: GOOGLE_CALENDAR_SCOPE,
+        scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
         state,
       }).toString();
 
@@ -91,24 +115,29 @@ export function createGoogleOAuthClient({
         redirectUri,
         fetchImpl,
       });
-      if (!tokens.refreshToken) {
+      const refreshToken = tokens.refreshToken || existingCredentials?.refreshToken;
+      if (!refreshToken) {
         throw oauthError(
           "oauth_refresh_token_missing",
-          "Google did not return offline access. Reconnect and approve Calendar access.",
+          "Google did not return offline access. Reconnect and approve Calendar + Gmail access.",
         );
       }
 
       await tokenStore.save({
-        refreshToken: tokens.refreshToken,
-        metadata: { connectedAt: new Date(now()).toISOString(), scope: GOOGLE_CALENDAR_SCOPE },
+        refreshToken,
+        metadata: {
+          connectedAt: new Date(now()).toISOString(),
+          scope: tokens.scope || GOOGLE_WORKSPACE_SCOPES.join(" "),
+        },
       });
       accessToken = tokens.accessToken;
       accessTokenExpiresAt = now() + tokens.expiresIn * 1000;
       return { connected: true, connectedAt: new Date(now()).toISOString() };
     },
 
-    async getAccessToken({ forceRefresh = false } = {}) {
+    async getAccessToken({ forceRefresh = false, requiredScope = "" } = {}) {
       assertConfigured();
+      await assertRequiredScope(requiredScope);
       if (!forceRefresh && accessToken && accessTokenExpiresAt - ACCESS_TOKEN_SKEW_MS > now()) {
         return accessToken;
       }
@@ -117,7 +146,7 @@ export function createGoogleOAuthClient({
       if (!stored) {
         throw oauthError(
           "integration_not_connected",
-          "Google Calendar is not connected. Connect it in Settings.",
+          "Google is not connected. Connect Google Calendar + Gmail in Settings.",
         );
       }
 
@@ -149,11 +178,15 @@ export function createGoogleOAuthClient({
       }
       try {
         const stored = await tokenStore.load();
-        return stored
-          ? { state: "connected", connectedAt: stored.metadata.connectedAt || null }
-          : { state: "disconnected" };
+        if (!stored) return { state: "disconnected" };
+        const scopes = String(stored.metadata?.scope || "").split(/\s+/);
+        return {
+          state: "connected",
+          connectedAt: stored.metadata.connectedAt || null,
+          gmailConnected: scopes.includes(GOOGLE_GMAIL_READONLY_SCOPE),
+        };
       } catch {
-        return { state: "error", message: "Saved Google Calendar credentials are unreadable." };
+        return { state: "error", message: "Saved Google credentials are unreadable." };
       }
     },
 
@@ -269,7 +302,8 @@ async function requestTokens(body, fetchImpl) {
   return {
     accessToken: payload.access_token,
     expiresIn: payload.expires_in,
-    refreshToken: typeof payload.refresh_token === "string" ? payload.refresh_token : null,
+    refreshToken: typeof payload.refresh_token === "string" ? payload.refresh_token : "",
+    scope: typeof payload.scope === "string" ? payload.scope : "",
   };
 }
 

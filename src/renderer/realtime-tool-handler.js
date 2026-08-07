@@ -155,6 +155,10 @@ export function formatToolStatus(name) {
     case "google_calendar_update_event":
     case "google_calendar_delete_event":
       return "Using Google Calendar…";
+    case "gmail_search_messages":
+      return "Searching Gmail…";
+    case "gmail_get_message":
+      return "Reading Gmail…";
     default:
       return "Using tool…";
   }

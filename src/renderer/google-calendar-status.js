@@ -10,22 +10,33 @@ export function createGoogleCalendarStatusView(status = {}, formatDate = default
     error: "Needs attention",
   };
   const messages = {
-    unconfigured: "Set BRAH_GOOGLE_OAUTH_CLIENT_ID to enable Google Calendar.",
-    disconnected: "Brah can manage events on calendars you own after you connect.",
-    connected: status.connectedAt
-      ? `Connected since ${formatDate(status.connectedAt)}. Brah can manage owned-calendar events.`
-      : "Connected. Brah can manage events on calendars you own.",
+    unconfigured: "Set BRAH_GOOGLE_OAUTH_CLIENT_ID to enable Google Calendar + Gmail.",
+    disconnected: "Connect once to manage owned-calendar events and read Gmail messages.",
+    connected: status.gmailConnected
+      ? status.connectedAt
+        ? `Connected since ${formatDate(status.connectedAt)}. Brah can manage calendar events and read Gmail.`
+        : "Connected. Brah can manage calendar events and read Gmail."
+      : "Calendar authentication is saved. Add Gmail access once without replacing it.",
     connecting: "Finish authorization in your system browser.",
-    error: status.message || "Google Calendar needs attention. Try connecting again.",
+    error: status.message || "Google Calendar + Gmail needs attention. Try connecting again.",
   };
 
   return {
     state,
     label: labels[state],
     message: status.message || messages[state],
-    connectDisabled: state === "connecting" || state === "unconfigured",
+    connectDisabled:
+      state === "connecting" ||
+      state === "unconfigured" ||
+      (state === "connected" && status.gmailConnected),
     connectLabel:
-      state === "connecting" ? "Connecting…" : state === "connected" ? "Reconnect" : "Connect",
+      state === "connecting"
+        ? "Connecting…"
+        : state === "connected" && status.gmailConnected
+          ? "Connected"
+          : state === "connected"
+            ? "Add Gmail"
+            : "Connect",
     disconnectHidden: state !== "connected",
     disconnectDisabled: state === "connecting",
   };

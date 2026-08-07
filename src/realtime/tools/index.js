@@ -1,5 +1,6 @@
 import { executeComputerUseTool } from "./computer-use-tools.js";
 import { executeFileSystemTool } from "./filesystem-tools.js";
+import { executeGmailTool } from "./gmail-tools.js";
 import { executeGoogleCalendarTool } from "./google-calendar-tools.js";
 import { executeMemoryTool } from "./memory-tools.js";
 import { executePlannerTool } from "./planner-tools.js";
@@ -24,6 +25,11 @@ export async function executeRealtimeTool(name, args = {}, options = {}) {
   const googleCalendarResult = await executeGoogleCalendarTool(name, args, options.googleCalendar);
   if (googleCalendarResult) {
     return googleCalendarResult;
+  }
+
+  const gmailResult = await executeGmailTool(name, args, options.gmail);
+  if (gmailResult) {
+    return gmailResult;
   }
 
   const webResult = await executeWebTool(name, args);

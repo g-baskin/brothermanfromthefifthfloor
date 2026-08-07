@@ -54,6 +54,16 @@ const toolPermissionMetadata = Object.freeze({
     label: "Delete Google Calendar event",
     description: "Permanently delete an event from your connected Google primary calendar.",
   },
+  gmail_search_messages: {
+    level: "sensitive",
+    label: "Search Gmail",
+    description: "Search message headers and snippets in your connected Gmail account.",
+  },
+  gmail_get_message: {
+    level: "sensitive",
+    label: "Read Gmail message",
+    description: "Read one email body from your connected Gmail account.",
+  },
   web_search: {
     level: "network",
     label: "Search web",
@@ -226,6 +236,10 @@ function summarizeToolRequest(name, args) {
       return summarizeFields(args, ["eventId", "summary", "start", "end", "location"]);
     case "google_calendar_delete_event":
       return summarizeFields(args, ["eventId"]);
+    case "gmail_search_messages":
+      return summarizeFields(args, ["query", "maxResults", "includeSpamTrash"]);
+    case "gmail_get_message":
+      return summarizeFields(args, ["messageId"]);
     case "web_search":
       return summarizeFields(args, ["query"]);
     case "web_fetch":

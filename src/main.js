@@ -22,6 +22,7 @@ import electronUpdater from "electron-updater";
 import QRCode from "qrcode";
 import WebSocket from "ws";
 import { createEncryptedTokenStore } from "./integrations/google/encrypted-token-store.js";
+import { createGmailClient } from "./integrations/google/gmail-client.js";
 import { createGoogleCalendarClient } from "./integrations/google/google-calendar-client.js";
 import { createGoogleOAuthClient } from "./integrations/google/google-oauth.js";
 import { resolveGoogleOAuthConfig } from "./integrations/google/google-runtime-config.js";
@@ -191,6 +192,7 @@ let mobileBridgeServer = null;
 let mobileBridgeHost = "127.0.0.1";
 let googleCalendarOAuth = null;
 let googleCalendarClient = null;
+let gmailClient = null;
 let googleCalendarConnecting = false;
 let googleCalendarLastError = null;
 const mobileVoiceStreams = new Map();
@@ -1028,7 +1030,7 @@ async function executeToolRequest(name, args = {}) {
   const startedAt = Date.now();
   await writeDiagnosticLog("tool.execute.start", {
     tool: name,
-    args: sanitizeDiagnosticValue(args),
+    args: sanitizeToolDiagnosticArgs(name, args),
     permissions: summarizePermissionSnapshot(await getOsPermissionStatus()),
   });
   const isComputerUse = name === "computer_use_task";
@@ -1078,6 +1080,7 @@ async function executeToolRequest(name, args = {}) {
         rootPath: app.getPath("home"),
       },
       googleCalendar: googleCalendarClient,
+      gmail: gmailClient,
     });
     await writeDiagnosticLog("tool.execute.finish", {
       tool: name,
@@ -1151,8 +1154,12 @@ function initializeGoogleCalendarIntegration() {
     tokenStore,
     openExternal: (url) => shell.openExternal(url),
   });
+  const getGoogleAccessToken = (options) => googleCalendarOAuth.getAccessToken(options);
   googleCalendarClient = createGoogleCalendarClient({
-    getAccessToken: (options) => googleCalendarOAuth.getAccessToken(options),
+    getAccessToken: getGoogleAccessToken,
+  });
+  gmailClient = createGmailClient({
+    getAccessToken: getGoogleAccessToken,
   });
 }
 
@@ -1743,6 +1750,19 @@ function createToolLogger(tool) {
 
 function summarizePermissionSnapshot(permissions) {
   return Object.fromEntries(permissions.map((permission) => [permission.id, permission.status]));
+}
+
+function sanitizeToolDiagnosticArgs(name, args) {
+  if (name === "gmail_search_messages") {
+    return sanitizeDiagnosticValue({
+      ...args,
+      ...(args.query ? { query: "[REDACTED EMAIL QUERY]" } : {}),
+    });
+  }
+  if (name === "gmail_get_message") {
+    return { messageId: "[REDACTED GMAIL MESSAGE ID]" };
+  }
+  return sanitizeDiagnosticValue(args);
 }
 
 function summarizeToolResult(result) {
