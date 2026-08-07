@@ -64,6 +64,11 @@ const toolPermissionMetadata = Object.freeze({
     label: "Read Gmail message",
     description: "Read one email body from your connected Gmail account.",
   },
+  knowledge_search: {
+    level: "read",
+    label: "Search knowledge base",
+    description: "Search your local knowledge base and read matching passages.",
+  },
   web_search: {
     level: "network",
     label: "Search web",

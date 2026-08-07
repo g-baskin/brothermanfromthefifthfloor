@@ -51,6 +51,46 @@ async function withToolHarness(callback) {
         body: events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""),
       });
     }
+    if (parsedUrl.hostname === "127.0.0.1" && parsedUrl.pathname === "/api/search") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            query: parsedUrl.searchParams.get("q"),
+            chunks: [
+              {
+                chunkId: "chunk-1",
+                documentId: "doc-1",
+                documentTitle: "Functional Note",
+                content: "A stored passage about functional testing.",
+                score: 0.82,
+              },
+            ],
+          };
+        },
+      };
+    }
+    if (parsedUrl.hostname === "127.0.0.1" && parsedUrl.pathname === "/api/documents") {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            documents: [
+              {
+                id: "doc-1",
+                title: "Functional Note",
+                sourceUrl: "https://example.com/note",
+                sourceTitle: "Example Source",
+                chunks: 3,
+              },
+            ],
+            total: 1,
+          };
+        },
+      };
+    }
     if (parsedUrl.hostname === "duckduckgo.com") {
       return createResponse({
         url,
@@ -81,6 +121,7 @@ async function withToolHarness(callback) {
       },
       googleCalendar: createGoogleCalendarHarness(),
       gmail: createGmailHarness(),
+      knowledge: { baseUrl: "http://127.0.0.1:3009" },
       fileSystem: { rootPath: directory },
     });
   } finally {
@@ -387,6 +428,17 @@ test("every registered Realtime tool executes a functional path", async () => {
     observedNames.push("gmail_get_message");
     assert.equal(result.status, "retrieved");
     assert.equal(result.email.body, "A Gmail message body.");
+
+    result = await executeRealtimeTool(
+      "knowledge_search",
+      { query: "functional testing", topK: 3 },
+      options,
+    );
+    observedNames.push("knowledge_search");
+    assert.equal(result.status, "ok");
+    assert.equal(result.matches.length, 1);
+    assert.equal(result.matches[0].title, "Functional Note");
+    assert.match(result.matches[0].content, /functional testing/);
 
     result = await executeRealtimeTool(
       "web_search",

@@ -21,11 +21,17 @@ import {
 import electronUpdater from "electron-updater";
 import QRCode from "qrcode";
 import WebSocket from "ws";
+import { summarizeToolResult } from "./diagnostics/summarize-tool-result.js";
 import { createEncryptedTokenStore } from "./integrations/google/encrypted-token-store.js";
 import { createGmailClient } from "./integrations/google/gmail-client.js";
 import { createGoogleCalendarClient } from "./integrations/google/google-calendar-client.js";
 import { createGoogleOAuthClient } from "./integrations/google/google-oauth.js";
 import { resolveGoogleOAuthConfig } from "./integrations/google/google-runtime-config.js";
+import {
+  checkKnowledgeBase,
+  defaultRagBaseUrl,
+  parseRagBaseUrl,
+} from "./integrations/noledge/noledge-client.js";
 import { createMobileBridgeServer } from "./mobile/bridge-server.js";
 import {
   clearPairingSession,
@@ -175,6 +181,7 @@ const defaultSettings = Object.freeze({
   customVoiceId: "",
   chatMemoryEnabled: true,
   chatMemoryRetention: 400,
+  ragBaseUrl: defaultRagBaseUrl,
 });
 
 const windowModes = Object.freeze({
@@ -479,6 +486,9 @@ ipcMain.handle("settings:get", async () => ({
   chatMemoryRetentionOptions,
 }));
 ipcMain.handle("settings:update", async (_event, updates = {}) => saveSettings(updates));
+ipcMain.handle("knowledge:check", async () =>
+  checkKnowledgeBase({ baseUrl: (await loadSettings()).ragBaseUrl }),
+);
 
 ipcMain.handle("planner:list-tasks", () => listTasks());
 ipcMain.handle("planner:list-calendar", () => listCalendarItems());
@@ -1051,6 +1061,7 @@ async function executeToolRequest(name, args = {}) {
       ...(credentials ? { openAI: { accessToken: credentials.accessToken } } : {}),
     };
     const result = await executeRealtimeTool(name, args, {
+      knowledge: { baseUrl: (await loadSettings()).ragBaseUrl },
       screenshot: screenshotOptions,
       computerUse: {
         ...(credentials
@@ -1763,21 +1774,6 @@ function sanitizeToolDiagnosticArgs(name, args) {
     return { messageId: "[REDACTED GMAIL MESSAGE ID]" };
   }
   return sanitizeDiagnosticValue(args);
-}
-
-function summarizeToolResult(result) {
-  if (!result || typeof result !== "object") {
-    return result;
-  }
-  const summary = {
-    status: result.status,
-    message: typeof result.message === "string" ? result.message.slice(0, 500) : undefined,
-    path: result.path,
-    dimensions: result.dimensions,
-    source: result.source,
-    resultCount: result.resultCount,
-  };
-  return Object.fromEntries(Object.entries(summary).filter(([, value]) => value !== undefined));
 }
 
 function sanitizeDiagnosticValue(value) {
@@ -3281,7 +3277,18 @@ function normalizeSettings(value) {
       ? value.chatMemoryEnabled
       : defaultSettings.chatMemoryEnabled;
   const chatMemoryRetention = normalizeChatMemoryRetention(value?.chatMemoryRetention);
-  return { voice, customVoiceId, chatMemoryEnabled, chatMemoryRetention };
+  const ragBaseUrl = normalizeRagBaseUrl(value?.ragBaseUrl);
+  return { voice, customVoiceId, chatMemoryEnabled, chatMemoryRetention, ragBaseUrl };
+}
+
+// Falls back to the default origin when the stored value is missing or invalid,
+// so a bad paste in settings can never leave the app with an unusable URL.
+function normalizeRagBaseUrl(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return defaultSettings.ragBaseUrl;
+  }
+  const parsed = parseRagBaseUrl(value);
+  return parsed.ok ? parsed.value : defaultSettings.ragBaseUrl;
 }
 
 function buildMemoryContextFromSettings(settings = defaultSettings, chatQuery = "") {

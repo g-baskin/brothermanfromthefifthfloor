@@ -137,6 +137,12 @@
               <span class="settings-hint">Caps stored chat memory. Higher values remember more but add more recall context.</span>
               <select id="chat-memory-retention" class="settings-select"></select>
             </label>
+            <label class="settings-field" for="rag-base-url">
+              <span class="settings-label">Knowledge base URL</span>
+              <span class="settings-hint">Where your local knowledge base is running. Start it yourself; Brah only queries it.</span>
+              <input id="rag-base-url" class="settings-input" type="text" placeholder="http://127.0.0.1:3009" autocomplete="off" spellcheck="false" />
+            </label>
+            <p id="rag-status" class="settings-description" aria-live="polite"></p>
             <section class="integration-card" aria-labelledby="google-calendar-title">
               <div class="integration-heading">
                 <span id="google-calendar-title" class="settings-label">Google Calendar + Gmail</span>

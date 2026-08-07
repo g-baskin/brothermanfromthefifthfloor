@@ -35,6 +35,8 @@ const customVoiceIdElement = document.querySelector("#custom-voice-id");
 const voiceDescriptionElement = document.querySelector("#voice-description");
 const chatMemoryEnabledElement = document.querySelector("#chat-memory-enabled");
 const chatMemoryRetentionElement = document.querySelector("#chat-memory-retention");
+const ragBaseUrlElement = document.querySelector("#rag-base-url");
+const ragStatusElement = document.querySelector("#rag-status");
 const googleCalendarStateElement = document.querySelector("#google-calendar-state");
 const googleCalendarStatusElement = document.querySelector("#google-calendar-status");
 const googleCalendarConnectButton = document.querySelector("#google-calendar-connect");
@@ -334,6 +336,21 @@ async function refreshSettings() {
     : [50, 100, 200, 400, 800];
   renderSettings(payload.settings ?? {});
   renderGoogleCalendarStatus(googleCalendarStatus);
+  // Probe in the background so opening Settings shows live connection state
+  // without blocking the rest of the panel on a possibly-offline service.
+  void refreshKnowledgeBaseStatus();
+}
+
+async function refreshKnowledgeBaseStatus() {
+  ragStatusElement.textContent = "Checking\u2026";
+  try {
+    const status = await window.brah.checkKnowledgeBase();
+    ragStatusElement.textContent = status?.ok
+      ? (status.message ?? "Knowledge base connected.")
+      : (status?.message ?? "Knowledge base is unreachable.");
+  } catch {
+    ragStatusElement.textContent = "Could not reach the knowledge base.";
+  }
 }
 
 function renderGoogleCalendarStatus(status = {}) {
@@ -386,7 +403,23 @@ function renderSettings(settings) {
     typeof settings.customVoiceId === "string" ? settings.customVoiceId : "";
   chatMemoryEnabledElement.checked = settings.chatMemoryEnabled !== false;
   renderChatMemoryRetention(settings.chatMemoryRetention);
+  ragBaseUrlElement.value = typeof settings.ragBaseUrl === "string" ? settings.ragBaseUrl : "";
   renderVoiceDescription(selectedVoice);
+}
+
+async function saveRagBaseUrl() {
+  ragBaseUrlElement.disabled = true;
+  ragStatusElement.textContent = "Checking…";
+  try {
+    const settings = await window.brah.updateSettings({ ragBaseUrl: ragBaseUrlElement.value });
+    renderSettings(settings);
+    await refreshKnowledgeBaseStatus();
+  } catch (error) {
+    ragStatusElement.textContent =
+      error instanceof Error ? error.message : "Could not save the knowledge base URL.";
+  } finally {
+    ragBaseUrlElement.disabled = false;
+  }
 }
 
 function renderChatMemoryRetention(selectedRetention) {
@@ -1953,6 +1986,9 @@ chatMemoryEnabledElement.addEventListener("change", () => {
 });
 chatMemoryRetentionElement.addEventListener("change", () => {
   void saveChatMemorySettings();
+});
+ragBaseUrlElement.addEventListener("change", () => {
+  void saveRagBaseUrl();
 });
 googleCalendarConnectButton.addEventListener("click", () => {
   void connectGoogleCalendarFromSettings();

@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("brah", {
   setMicrophoneDevice: (deviceId) => ipcRenderer.invoke("audio:set-microphone", deviceId),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   updateSettings: (updates) => ipcRenderer.invoke("settings:update", updates),
+  checkKnowledgeBase: () => ipcRenderer.invoke("knowledge:check"),
   getOsPermissions: () => ipcRenderer.invoke("permissions:get-status"),
   requestOsPermission: (id) => ipcRenderer.invoke("permissions:request", id),
   openOsPermissionSettings: (id) => ipcRenderer.invoke("permissions:open-settings", id),

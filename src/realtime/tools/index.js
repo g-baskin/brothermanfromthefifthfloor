@@ -2,6 +2,7 @@ import { executeComputerUseTool } from "./computer-use-tools.js";
 import { executeFileSystemTool } from "./filesystem-tools.js";
 import { executeGmailTool } from "./gmail-tools.js";
 import { executeGoogleCalendarTool } from "./google-calendar-tools.js";
+import { executeKnowledgeTool } from "./knowledge-tools.js";
 import { executeMemoryTool } from "./memory-tools.js";
 import { executePlannerTool } from "./planner-tools.js";
 import { executeScreenshotTool } from "./screenshot-tools.js";
@@ -30,6 +31,11 @@ export async function executeRealtimeTool(name, args = {}, options = {}) {
   const gmailResult = await executeGmailTool(name, args, options.gmail);
   if (gmailResult) {
     return gmailResult;
+  }
+
+  const knowledgeResult = await executeKnowledgeTool(name, args, options.knowledge);
+  if (knowledgeResult) {
+    return knowledgeResult;
   }
 
   const webResult = await executeWebTool(name, args);

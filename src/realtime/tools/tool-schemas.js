@@ -459,6 +459,32 @@ export const realtimeToolDefinitions = Object.freeze([
   },
   {
     type: "function",
+    name: "knowledge_search",
+    description:
+      "Search Greg's saved documents (legal dictionaries, statutes, county codes, PDFs, notes) and return the actual source passages, each with a relevance score. The content field is real stored text: quote it verbatim when he asks what a document says, and name the document title. Prefer this over web_search for anything he has saved. Do not fall back to the web merely because the first passages look imperfect -- retry once with a shorter query first. Only say the knowledge base is unavailable when the result status is literally 'unavailable'.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Short keyword query, ideally the bare term being looked up, such as 'corporation' or 'zoning ordinance'. Retrieval is semantic, so padding like 'definition of' or the source name scores worse than the bare term. Do not add quotes.",
+          minLength: 1,
+          maxLength: 240,
+        },
+        topK: {
+          type: "integer",
+          description: "Maximum number of passages to return, default 8 and cap 20.",
+          minimum: 1,
+          maximum: 20,
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "web_search",
     description:
       "Search the public web for current information and return concise result summaries.",

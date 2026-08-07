@@ -25,6 +25,7 @@ const expectedToolNames = [
   "google_calendar_delete_event",
   "gmail_search_messages",
   "gmail_get_message",
+  "knowledge_search",
   "web_search",
   "web_fetch",
   "read_file",
