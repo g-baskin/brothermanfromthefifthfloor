@@ -47,6 +47,11 @@ import {
   getWindowsPrivacySettingsUrl,
   isKnownOsPermissionId,
 } from "./os-permissions.js";
+import {
+  defaultNoiseReduction,
+  defaultServerTurnDetection,
+  defaultTranscription,
+} from "./realtime/audio-input-defaults.js";
 import { buildRealtimeInstructions } from "./realtime/prompts.js";
 import {
   listActivity,
@@ -2290,8 +2295,8 @@ async function createMobileRealtimeVoiceConversationSession(
     audio: {
       input: {
         format: { type: "audio/pcm", rate: audio.sampleRate },
-        noise_reduction: { type: "near_field" },
-        transcription: { model: "gpt-4o-transcribe" },
+        noise_reduction: defaultNoiseReduction,
+        transcription: defaultTranscription,
         turn_detection: {
           type: "semantic_vad",
           eagerness: "high",
@@ -3187,19 +3192,11 @@ function buildRealtimeSessionConfig(options) {
       input: {
         // WebRTC negotiates the microphone codec and rate in SDP. Declaring a
         // separate PCM format here can make the server interpret Opus RTP incorrectly.
-        noise_reduction: inputAudioOptions.noise_reduction ?? { type: "near_field" },
-        transcription: inputAudioOptions.transcription ?? { model: "gpt-4o-transcribe" },
+        noise_reduction: inputAudioOptions.noise_reduction ?? defaultNoiseReduction,
+        transcription: inputAudioOptions.transcription ?? defaultTranscription,
         turn_detection: Object.hasOwn(inputAudioOptions, "turn_detection")
           ? inputAudioOptions.turn_detection
-          : {
-              // Acoustic server VAD reliably detects short, casual utterances.
-              type: "server_vad",
-              threshold: 0.35,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 650,
-              create_response: true,
-              interrupt_response: true,
-            },
+          : defaultServerTurnDetection,
       },
       // Output codec/rate is also negotiated by WebRTC SDP.
       output: { voice, speed },
