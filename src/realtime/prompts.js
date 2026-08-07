@@ -86,15 +86,23 @@ export function buildRuntimeInstructions(now = new Date()) {
   ].join("\n");
 }
 
+export const ONGOING_CONVERSATION_INSTRUCTIONS = `# Hangout Mode
+- This is an open-ended hangout, not a task call. The end_call tool is unavailable to you.
+- Never try to hang up, wrap up, or say a final goodbye. Greg ends the session with the End button.
+- Silence is fine. If Greg goes quiet, stay quiet and wait instead of prompting or filling the gap.
+- When Greg says something like "bye" or "talk later", answer naturally and keep the line open.`;
+
 export function buildRealtimeInstructions({
   memoryContext = "",
   now = new Date(),
+  ongoing = false,
   profile = DEFAULT_AGENT_PROFILE,
   voiceStyle = "",
 } = {}) {
   return [
     buildAgentInstructions(profile),
     normalizeVoiceStyle(voiceStyle),
+    ongoing ? ONGOING_CONVERSATION_INSTRUCTIONS : "",
     normalizeMemoryContext(memoryContext),
     buildRuntimeInstructions(now),
   ]

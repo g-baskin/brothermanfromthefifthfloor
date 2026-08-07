@@ -539,13 +539,16 @@ async function createRealtimeSecret(options = {}) {
   }
   const settings = await loadSettings();
   const realtimeSettings = resolveRealtimeSettings(settings);
+  const ongoing = options.ongoing === true;
 
   return createRealtimeClientSecret(credentials, {
     ...options,
+    ongoing,
     voice: realtimeSettings.voice,
     speed: realtimeSettings.speed,
     instructions: buildRealtimeInstructions({
-      memoryContext: buildMemoryContextFromSettings(await loadSettings()),
+      memoryContext: buildMemoryContextFromSettings(settings),
+      ongoing,
       profile: loadAgentProfile(),
       voiceStyle: realtimeSettings.instructions,
     }),
@@ -1122,7 +1125,11 @@ app.whenReady().then(async () => {
   createMainWindow();
 
   if (!isDevelopment) {
-    autoUpdater.checkForUpdatesAndNotify();
+    void autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      void writeDiagnosticLog("update.check.error", {
+        error: formatDiagnosticError(error),
+      });
+    });
   }
 
   app.on("activate", () => {
@@ -1542,34 +1549,42 @@ async function revealScreenshot(name) {
 }
 
 const MAX_DIAGNOSTIC_LOG_BYTES = 1_000_000;
+let diagnosticWriteQueue = Promise.resolve();
 
 async function writeDiagnosticLog(event, details = {}) {
-  // Per-line entries stay lean (time/event/details) so the log is easy to read
-  // and copy-paste; the static environment context lives in the session.start
-  // header written once per launch.
   const entry = { time: new Date().toISOString(), event, details };
   const line = `${JSON.stringify(entry)}\n`;
+  const write = diagnosticWriteQueue.then(() => appendBoundedDiagnosticLine(line));
+  diagnosticWriteQueue = write.catch(() => {});
   try {
-    await fs.mkdir(path.dirname(getDiagnosticLogPath()), { recursive: true });
-    await fs.appendFile(getDiagnosticLogPath(), line);
+    await write;
   } catch (error) {
     safeConsole("error", "diagnostic log write failed", error);
   }
   safeConsole("info", "diagnostic", event, details);
 }
 
-// Rotates the log when it grows large and writes a session header so every run
-// in the log is self-describing (app version, platform, displays).
-async function startDiagnosticSession() {
+async function appendBoundedDiagnosticLine(line) {
   const logPath = getDiagnosticLogPath();
+  await fs.mkdir(path.dirname(logPath), { recursive: true });
   try {
     const stats = await fs.stat(logPath);
-    if (stats.size > MAX_DIAGNOSTIC_LOG_BYTES) {
-      await fs.rename(logPath, `${logPath}.prev`);
+    if (stats.size + Buffer.byteLength(line) > MAX_DIAGNOSTIC_LOG_BYTES) {
+      const previousPath = `${logPath}.prev`;
+      await fs.rm(previousPath, { force: true });
+      await fs.rename(logPath, previousPath);
     }
-  } catch {
-    // No existing log to rotate.
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
   }
+  await fs.appendFile(logPath, line, { mode: 0o600 });
+}
+
+// Writes a session header so every run is self-describing. Rotation is applied
+// on every diagnostic write, including long-running calls.
+async function startDiagnosticSession() {
   const primary = screen.getPrimaryDisplay();
   await writeDiagnosticLog("session.start", {
     appVersion: app.getVersion(),
@@ -1626,10 +1641,13 @@ function sanitizeDiagnosticValue(value) {
     return typeof value === "string" ? value.slice(0, 500) : value;
   }
   return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      key.toLowerCase().includes("token") ? "[redacted]" : sanitizeDiagnosticValue(item),
-    ]),
+    Object.entries(value).map(([key, item]) => {
+      const normalizedKey = key.toLowerCase();
+      const isSecret = ["token", "secret", "authorization", "api_key", "apikey"].some((part) =>
+        normalizedKey.includes(part),
+      );
+      return [key, isSecret ? "[redacted]" : sanitizeDiagnosticValue(item)];
+    }),
   );
 }
 
@@ -1827,7 +1845,9 @@ async function loginOpenAI() {
   authUrl.searchParams.set("code_challenge_method", "S256");
   authUrl.searchParams.set("id_token_add_organizations", "true");
   authUrl.searchParams.set("codex_cli_simplified_flow", "true");
-  authUrl.searchParams.set("originator", "ggcoder");
+  // `clientId` above is the Codex CLI's OAuth client, so send its matching
+  // originator rather than a name this client was never registered under.
+  authUrl.searchParams.set("originator", "codex_cli_rs");
 
   try {
     await shell.openExternal(authUrl.toString());
@@ -1844,6 +1864,7 @@ async function loginOpenAI() {
       codeVerifier: verifier,
       redirectUri,
     });
+    await fs.rm(signedOutMarkerPath(), { force: true });
     await saveOpenAICredentials(credentials);
     return credentials;
   } finally {
@@ -2984,6 +3005,7 @@ async function createRealtimeClientSecret(credentials, options) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${credentials.accessToken}`,
+      ...(credentials.accountId ? { "ChatGPT-Account-ID": credentials.accountId } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ session: buildRealtimeSessionConfig(options) }),
@@ -3010,7 +3032,6 @@ function buildRealtimeSessionConfig(options) {
       ? options.instructions.trim()
       : buildRealtimeInstructions({ memoryContext: buildMemoryContext() });
   const inputAudioOptions = isRecord(options.audio?.input) ? options.audio.input : {};
-  const outputAudioOptions = isRecord(options.audio?.output) ? options.audio.output : {};
 
   return {
     type: "realtime",
@@ -3021,42 +3042,34 @@ function buildRealtimeSessionConfig(options) {
       : ["audio"],
     audio: {
       input: {
-        format: normalizeRealtimeAudioFormat(inputAudioOptions.format, realtimeDefaults.sampleRate),
+        // WebRTC negotiates the microphone codec and rate in SDP. Declaring a
+        // separate PCM format here can make the server interpret Opus RTP incorrectly.
         noise_reduction: inputAudioOptions.noise_reduction ?? { type: "near_field" },
         transcription: inputAudioOptions.transcription ?? { model: "gpt-4o-transcribe" },
         turn_detection: Object.hasOwn(inputAudioOptions, "turn_detection")
           ? inputAudioOptions.turn_detection
           : {
-              type: "semantic_vad",
-              eagerness: "high",
+              // Acoustic server VAD reliably detects short, casual utterances.
+              type: "server_vad",
+              threshold: 0.35,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 650,
               create_response: true,
               interrupt_response: true,
             },
       },
-      output: {
-        format: normalizeRealtimeAudioFormat(
-          outputAudioOptions.format,
-          realtimeDefaults.sampleRate,
-        ),
-        voice,
-        speed,
-      },
+      // Output codec/rate is also negotiated by WebRTC SDP.
+      output: { voice, speed },
     },
     max_output_tokens: 4096,
     reasoning: { effort: "minimal" },
-    tools: getRealtimeToolDefinitions(),
+    // In an ongoing hangout only the End button stops the session, so withhold
+    // end_call rather than relying on the prompt to keep the model from hanging up.
+    tools: options.ongoing
+      ? getRealtimeToolDefinitions().filter((tool) => tool.name !== "end_call")
+      : getRealtimeToolDefinitions(),
     tool_choice: "auto",
     tracing: "auto",
-  };
-}
-
-function normalizeRealtimeAudioFormat(value, fallbackRate) {
-  const rate = Number(value?.rate);
-  return {
-    type: value?.type === "audio/pcmu" ? "audio/pcmu" : "audio/pcm",
-    ...(Number.isInteger(rate) && rate >= 8000 && rate <= 48000
-      ? { rate }
-      : { rate: fallbackRate }),
   };
 }
 
@@ -3192,6 +3205,14 @@ async function getFreshOpenAICredentials() {
 }
 
 async function loadOpenAICredentials() {
+  const stored = await readStoredOpenAICredentials();
+  if (stored) {
+    return stored;
+  }
+  return importCodexCliCredentials();
+}
+
+async function readStoredOpenAICredentials() {
   try {
     const raw = await fs.readFile(credentialsPath(), "utf8");
     const payload = JSON.parse(raw);
@@ -3208,6 +3229,56 @@ async function loadOpenAICredentials() {
   }
 }
 
+// Brah signs in with the same OAuth client the Codex CLI uses. When the user has
+// already authorized that client on this machine, adopt those tokens instead of
+// forcing a second browser round-trip. Skipped once the user explicitly signs out.
+async function importCodexCliCredentials() {
+  if (await isOpenAISignedOut()) {
+    return null;
+  }
+  let tokens;
+  try {
+    const raw = await fs.readFile(codexCliCredentialsPath(), "utf8");
+    tokens = JSON.parse(raw)?.tokens;
+  } catch {
+    return null;
+  }
+  if (!isRecord(tokens)) {
+    return null;
+  }
+  const accessToken = typeof tokens.access_token === "string" ? tokens.access_token : undefined;
+  const refreshToken = typeof tokens.refresh_token === "string" ? tokens.refresh_token : undefined;
+  if (!accessToken || !refreshToken) {
+    return null;
+  }
+  const exp = decodeJwt(accessToken)?.exp;
+  const accountId = getAccountId(accessToken);
+  const credentials = {
+    accessToken,
+    refreshToken,
+    // Without a usable `exp` claim, treat the token as due for refresh so the
+    // normal refresh path runs before the first Realtime request.
+    expiresAt: typeof exp === "number" ? exp * 1000 : 0,
+    ...(accountId ? { accountId } : {}),
+  };
+  await saveOpenAICredentials(credentials);
+  await writeDiagnosticLog("openai.credentials.imported", { source: "codex-cli" });
+  return credentials;
+}
+
+function codexCliCredentialsPath() {
+  return path.join(os.homedir(), ".codex", "auth.json");
+}
+
+async function isOpenAISignedOut() {
+  try {
+    await fs.access(signedOutMarkerPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function saveOpenAICredentials(credentials) {
   await fs.mkdir(path.dirname(credentialsPath()), { recursive: true });
   const json = JSON.stringify(credentials);
@@ -3219,6 +3290,12 @@ async function saveOpenAICredentials(credentials) {
 
 async function clearOpenAICredentials() {
   await fs.rm(credentialsPath(), { force: true });
+  await fs.mkdir(path.dirname(signedOutMarkerPath()), { recursive: true });
+  await fs.writeFile(signedOutMarkerPath(), new Date().toISOString(), { mode: 0o600 });
+}
+
+function signedOutMarkerPath() {
+  return path.join(app.getPath("userData"), "openai-signed-out");
 }
 
 function credentialsPath() {

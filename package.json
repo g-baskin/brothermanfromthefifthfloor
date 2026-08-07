@@ -41,6 +41,7 @@
         "dir"
       ],
       "hardenedRuntime": true,
+      "identity": "-",
       "gatekeeperAssess": false,
       "timestamp": null,
       "entitlements": "build/entitlements.mac.plist",

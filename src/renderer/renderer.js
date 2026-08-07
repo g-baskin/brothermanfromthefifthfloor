@@ -72,6 +72,7 @@ const agentGoalsInput = document.querySelector("#agent-goals");
 const agentStatusElement = document.querySelector("#agent-status");
 const callToggleButton = document.querySelector("#call-toggle");
 const headerCallButton = document.querySelector("#header-call");
+const hangoutButton = document.querySelector("#header-hangout");
 const headerCallLabelElement = document.querySelector("#header-call-label");
 const callLabelElement = document.querySelector("#call-label");
 const callEndButton = document.querySelector("#call-end");
@@ -91,6 +92,9 @@ let peerConnection = null;
 let dataChannel = null;
 let localStream = null;
 let audioLevelMonitor = null;
+let callDiagnosticsTimer = null;
+let currentConversationId = null;
+let currentConversationMode = "call";
 let pendingHangup = false;
 let hangupFallbackTimer = null;
 const playbackTracker = createRealtimePlaybackTracker();
@@ -102,8 +106,8 @@ let isCallActive = false;
 let agentProfile = normalizeAgentProfile(null);
 // Preferred microphone deviceId, or null to follow the system default.
 let selectedMicId = null;
-// While the welcome greeting plays we mute the mic so laptop speakers can't
-// echo it back and trigger a self-reply; this holds the safety-unmute timer.
+// Prevent the opening greeting from feeding back into server VAD while keeping
+// a safety timeout so a missed playback event can never strand the microphone.
 let welcomeMicGuardTimer = null;
 let voiceOptions = [];
 let chatMemoryRetentionOptions = [];
@@ -217,6 +221,7 @@ function setOpenAIConnected(connected) {
   openAIIndicatorElement.dataset.connected = String(connected);
   callToggleButton.disabled = !connected;
   headerCallButton.disabled = !connected;
+  hangoutButton.disabled = !connected || isCallActive;
   appShellElement.classList.toggle("is-authorized", connected);
   if (!connected) {
     setMode("idle");
@@ -235,6 +240,8 @@ function setCallActive(active, { inactiveWindowMode = "panel" } = {}) {
   headerCallButton.setAttribute("aria-pressed", String(active));
   headerCallLabelElement.textContent = active ? "End" : "Call";
   callLabelElement.textContent = active ? "End" : "Call";
+  // Hangout only starts sessions; ending one goes through Call/End.
+  hangoutButton.disabled = active || !isOpenAIConnected;
   callEndButton.disabled = !active;
   callEndButton.tabIndex = active ? 0 : -1;
   appShellElement.dataset.call = active ? "active" : "idle";
@@ -867,6 +874,7 @@ async function connectOpenAI() {
   connectOpenAIButton.disabled = true;
   callToggleButton.disabled = true;
   headerCallButton.disabled = true;
+  hangoutButton.disabled = true;
   setStatus(isOpenAIConnected ? "Reconnecting…" : "Opening browser…");
   setMode("connecting");
 
@@ -887,6 +895,7 @@ async function connectOpenAI() {
     connectOpenAIButton.disabled = false;
     callToggleButton.disabled = !isOpenAIConnected;
     headerCallButton.disabled = !isOpenAIConnected;
+    hangoutButton.disabled = !isOpenAIConnected || isCallActive;
   }
 }
 
@@ -899,7 +908,12 @@ async function toggleCall() {
   await startCall();
 }
 
-async function startCall() {
+// The button is disabled while a session is live, so this only ever starts one.
+async function startHangout() {
+  await startCall({ ongoing: true });
+}
+
+async function startCall({ ongoing = false } = {}) {
   if (!isOpenAIConnected) {
     setStatus("Connect first");
     return;
@@ -907,6 +921,7 @@ async function startCall() {
 
   callToggleButton.disabled = true;
   headerCallButton.disabled = true;
+  hangoutButton.disabled = true;
   // Hide the panel instantly (no fade) before resizing so the UI just
   // disappears rather than morphing through a circle into the call pill.
   if (panelController.isOpen()) {
@@ -917,10 +932,18 @@ async function startCall() {
   setMode("connecting");
   await writeRendererDiagnostic("call.start", {
     mediaDevicesAvailable: Boolean(navigator.mediaDevices?.getUserMedia),
+    ongoing,
   });
 
   try {
-    const secret = await window.brah.createRealtimeSecret();
+    currentConversationId = crypto.randomUUID();
+    currentConversationMode = ongoing ? "hangout" : "call";
+    await writeRendererDiagnostic("call.identity", {
+      conversationId: currentConversationId,
+      mode: currentConversationMode,
+    });
+    await ensureMicrophoneAccess();
+    const secret = await window.brah.createRealtimeSecret({ ongoing });
     await writeRendererDiagnostic("call.secret.created", { hasValue: Boolean(secret?.value) });
     localStream = await acquireMicrophoneStream();
     await writeRendererDiagnostic("call.microphone.stream", describeMediaStream(localStream));
@@ -934,6 +957,16 @@ async function startCall() {
     peerConnection.ontrack = (event) => {
       const [stream] = event.streams;
       remoteAudioElement.srcObject = stream;
+      remoteAudioElement.muted = false;
+      remoteAudioElement.volume = 1;
+      // Do not rely on autoplay alone: Electron may receive the remote track
+      // after the click's user-activation window has elapsed.
+      void remoteAudioElement
+        .play()
+        .then(() => writeRendererDiagnostic("call.remote_audio.playing", {}))
+        .catch((error) =>
+          writeRendererDiagnostic("call.remote_audio.play_failed", formatRendererError(error)),
+        );
       audioLevelMonitor?.setRemoteStream(stream);
     };
     peerConnection.onconnectionstatechange = () => {
@@ -959,8 +992,8 @@ async function startCall() {
     });
     dataChannel.addEventListener("message", (event) => {
       const realtimeEvent = JSON.parse(event.data);
-      // Skip high-frequency streaming deltas so the diagnostic log stays a
-      // readable, copy-pasteable record of meaningful events.
+      // Persist concise event summaries; exact user/assistant transcripts are
+      // logged separately by conversation.turn with memory retention applied.
       if (!isNoisyRealtimeEvent(realtimeEvent?.type)) {
         void writeRendererDiagnostic("realtime.event", summarizeRealtimeEvent(realtimeEvent));
       }
@@ -995,6 +1028,7 @@ async function startCall() {
     await writeRendererDiagnostic("call.remote_description.set", {
       connectionState: peerConnection.connectionState,
     });
+    startCallDiagnostics();
 
     setStatus("Connecting");
   } catch (error) {
@@ -1004,10 +1038,12 @@ async function startCall() {
   } finally {
     callToggleButton.disabled = !isOpenAIConnected;
     headerCallButton.disabled = !isOpenAIConnected;
+    hangoutButton.disabled = !isOpenAIConnected || isCallActive;
   }
 }
 
 async function stopCall() {
+  stopCallDiagnostics();
   audioLevelMonitor?.stop();
   audioLevelMonitor = null;
   setOrbLevel(0);
@@ -1038,6 +1074,14 @@ async function stopCall() {
     clearTimeout(welcomeMicGuardTimer);
     welcomeMicGuardTimer = null;
   }
+  if (currentConversationId) {
+    await writeRendererDiagnostic("call.stopped", {
+      conversationId: currentConversationId,
+      mode: currentConversationMode,
+    });
+  }
+  currentConversationId = null;
+  currentConversationMode = "call";
   playbackTracker.reset();
   responseCoordinator.reset();
   waitingSound.reset();
@@ -1053,7 +1097,6 @@ async function stopCall() {
 
 async function handleRealtimeEvent(event) {
   playbackTracker.observe(event);
-  // The welcome greeting finished playing through the speakers — safe to listen.
   if (welcomeMicGuardTimer !== null && event.type === "output_audio_buffer.stopped") {
     endWelcomeMicGuard();
   }
@@ -1113,17 +1156,45 @@ async function handleRealtimeEvent(event) {
 function recordRealtimeChatMemory(event) {
   const userTranscript = extractUserTranscript(event);
   if (userTranscript) {
-    void window.brah.recordChatTurn({ source: "desktop", role: "user", content: userTranscript });
+    void persistRealtimeConversationTurn("user", userTranscript);
   }
   if (event.type === "response.done") {
     const assistantText = extractAssistantResponseText(event.response);
     if (assistantText) {
-      void window.brah.recordChatTurn({
-        source: "desktop",
-        role: "assistant",
-        content: assistantText,
-      });
+      void persistRealtimeConversationTurn("assistant", assistantText);
     }
+  }
+}
+
+async function persistRealtimeConversationTurn(role, content) {
+  const conversationId = currentConversationId;
+  if (!conversationId) {
+    await writeRendererDiagnostic("conversation.turn.missing_identity", { role, content });
+    return;
+  }
+  const turn = {
+    conversationId,
+    mode: currentConversationMode,
+    source: "desktop",
+    role,
+    content,
+  };
+  try {
+    const memoryResult = await window.brah.recordChatTurn(turn);
+    await writeRendererDiagnostic("conversation.turn", {
+      conversationId,
+      mode: turn.mode,
+      role,
+      content,
+      memoryResult,
+    });
+  } catch (error) {
+    await writeRendererDiagnostic("conversation.turn.persist_failed", {
+      conversationId,
+      role,
+      content,
+      error: formatRendererError(error),
+    });
   }
 }
 
@@ -1258,6 +1329,34 @@ function isRealAudioInputId(deviceId) {
   );
 }
 
+// A Chromium media track can appear live while macOS TCC still feeds it silence,
+// so require native microphone permission before creating the WebRTC session.
+async function ensureMicrophoneAccess() {
+  const permissions = await window.brah.getOsPermissions();
+  const microphone = permissions.find((permission) => permission.id === "microphone");
+  await writeRendererDiagnostic("call.microphone.permission", {
+    conversationId: currentConversationId,
+    status: microphone?.status ?? "missing",
+  });
+  if (!microphone || microphone.status === "granted" || microphone.status === "unsupported") {
+    return;
+  }
+
+  setStatus("Allow microphone access…");
+  const updatedPermissions = await window.brah.requestOsPermission("microphone");
+  const updatedMicrophone = updatedPermissions.find((permission) => permission.id === "microphone");
+  await writeRendererDiagnostic("call.microphone.permission_result", {
+    conversationId: currentConversationId,
+    status: updatedMicrophone?.status ?? "missing",
+  });
+  if (updatedMicrophone?.status !== "granted") {
+    await window.brah.openOsPermissionSettings("microphone");
+    throw new Error(
+      "Microphone access is required. Allow Brah/Electron in System Settings → Privacy & Security → Microphone, then try again.",
+    );
+  }
+}
+
 // Acquires the mic with the chosen device + echo cancellation. If a pinned
 // device is missing (unplugged, or saved on a different machine/OS), it falls
 // back to the system default so calls still connect cross-platform.
@@ -1319,10 +1418,6 @@ async function switchMicrophone() {
 }
 
 function sendRealtimeWelcome() {
-  // Laptop speakers echo the greeting into the mic and (even with echo
-  // cancellation) the eager semantic VAD hears it as a user turn, making the
-  // model reply to itself. Mute the mic for the greeting — no user input is
-  // expected during it — and unmute once its audio finishes playing.
   beginWelcomeMicGuard();
   sendRealtimeDataChannelEvent({
     type: "response.create",
@@ -1338,8 +1433,7 @@ function beginWelcomeMicGuard() {
   if (welcomeMicGuardTimer !== null) {
     clearTimeout(welcomeMicGuardTimer);
   }
-  // Safety net: never leave the mic muted if the audio-stopped event is missed.
-  welcomeMicGuardTimer = setTimeout(endWelcomeMicGuard, 12000);
+  welcomeMicGuardTimer = setTimeout(endWelcomeMicGuard, 12_000);
 }
 
 function endWelcomeMicGuard() {
@@ -1440,6 +1534,79 @@ function summarizeRealtimeEvent(event) {
   return summary;
 }
 
+function startCallDiagnostics() {
+  stopCallDiagnostics();
+  let sample = 0;
+  const capture = async () => {
+    const connection = peerConnection;
+    if (!connection) {
+      return;
+    }
+    sample += 1;
+    const reports = [];
+    try {
+      const stats = await connection.getStats();
+      for (const report of stats.values()) {
+        if (
+          (report.type === "media-source" && report.kind === "audio") ||
+          (report.type === "outbound-rtp" && report.kind === "audio") ||
+          (report.type === "inbound-rtp" && report.kind === "audio") ||
+          (report.type === "candidate-pair" && report.state === "succeeded")
+        ) {
+          reports.push({
+            id: report.id,
+            type: report.type,
+            kind: report.kind,
+            state: report.state,
+            audioLevel: report.audioLevel,
+            totalAudioEnergy: report.totalAudioEnergy,
+            totalSamplesDuration: report.totalSamplesDuration,
+            bytesSent: report.bytesSent,
+            packetsSent: report.packetsSent,
+            bytesReceived: report.bytesReceived,
+            packetsReceived: report.packetsReceived,
+            packetsLost: report.packetsLost,
+            currentRoundTripTime: report.currentRoundTripTime,
+          });
+        }
+      }
+      await writeRendererDiagnostic("call.health", {
+        conversationId: currentConversationId,
+        sample,
+        connectionState: connection.connectionState,
+        iceConnectionState: connection.iceConnectionState,
+        signalingState: connection.signalingState,
+        levels: audioLevelMonitor?.getLevels() ?? null,
+        microphone: localStream ? describeMediaStream(localStream) : null,
+        transceivers: connection.getTransceivers().map((transceiver) => ({
+          mid: transceiver.mid,
+          direction: transceiver.direction,
+          currentDirection: transceiver.currentDirection,
+          senderTrackState: transceiver.sender.track?.readyState,
+          senderTrackEnabled: transceiver.sender.track?.enabled,
+          receiverTrackState: transceiver.receiver.track?.readyState,
+        })),
+        reports,
+      });
+    } catch (error) {
+      await writeRendererDiagnostic("call.health_failed", {
+        conversationId: currentConversationId,
+        sample,
+        error: formatRendererError(error),
+      });
+    }
+  };
+  void capture();
+  callDiagnosticsTimer = setInterval(capture, 10_000);
+}
+
+function stopCallDiagnostics() {
+  if (callDiagnosticsTimer !== null) {
+    clearInterval(callDiagnosticsTimer);
+    callDiagnosticsTimer = null;
+  }
+}
+
 function summarizeRealtimeInput(input) {
   return input.map((item) => ({
     type: item?.type,
@@ -1478,12 +1645,16 @@ function startAudioLevelMonitor(microphoneStream) {
   let remoteAnalyser = null;
   let animationFrame = null;
   let smoothedLevel = 0;
+  let lastMicLevel = 0;
+  let lastRemoteLevel = 0;
 
   setupWaveCanvas();
 
   function read() {
     const micLevel = readAnalyserLevel(micAnalyser);
     const remoteLevel = remoteAnalyser ? readAnalyserLevel(remoteAnalyser) : 0;
+    lastMicLevel = micLevel;
+    lastRemoteLevel = remoteLevel;
     const level = Math.max(micLevel, remoteLevel * 1.15);
     smoothedLevel = smoothedLevel * 0.72 + level * 0.28;
     setOrbLevel(smoothedLevel);
@@ -1494,6 +1665,13 @@ function startAudioLevelMonitor(microphoneStream) {
   audioLevelMonitor = {
     setRemoteStream(stream) {
       remoteAnalyser = createAnalyser(audioContext, stream);
+    },
+    getLevels() {
+      return {
+        microphone: lastMicLevel,
+        remote: lastRemoteLevel,
+        contextState: audioContext.state,
+      };
     },
     stop() {
       if (animationFrame !== null) {
@@ -1746,6 +1924,7 @@ initClickSound();
 
 callToggleButton.addEventListener("click", toggleCall);
 headerCallButton.addEventListener("click", toggleCall);
+hangoutButton.addEventListener("click", startHangout);
 callEndButton.addEventListener("click", () => {
   // Same button, context-aware: during computer use it stops the task and keeps
   // the call going; otherwise it ends the call.

@@ -330,6 +330,22 @@ button {
   opacity: 0.4;
 }
 
+/* Hangout is the secondary of the two start buttons, so it reads as an outline
+   next to the filled Call button instead of competing with it. */
+.header-hangout {
+  padding: 0 11px;
+  color: var(--text);
+  background: var(--raised);
+  box-shadow: none;
+  border: 1px solid var(--hairline);
+}
+
+.header-hangout:hover:not(:disabled) {
+  background: var(--raised);
+  border-color: rgba(124, 140, 255, 0.6);
+  box-shadow: 0 0 0 1px rgba(124, 140, 255, 0.25);
+}
+
 .header-call.is-active {
   background: linear-gradient(180deg, #fb7185, #ef4358);
   box-shadow:
