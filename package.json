@@ -4,7 +4,7 @@
   "description": "A fresh Electron desktop app.",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "node --env-file-if-exists=.env.local ./node_modules/electron/cli.js .",
     "mobile:install": "npm install --prefix mobile/brah-mobile",
     "mobile:android": "npm run android --prefix mobile/brah-mobile",
     "mobile:dev-client": "npm run android --prefix mobile/brah-mobile",

@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld("brah", {
   getGoogleCalendarStatus: () => ipcRenderer.invoke("google-calendar:get-status"),
   connectGoogleCalendar: () => ipcRenderer.invoke("google-calendar:connect"),
   disconnectGoogleCalendar: () => ipcRenderer.invoke("google-calendar:disconnect"),
+  onGoogleCalendarStatusChanged: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("google-calendar:status-changed", listener);
+    return () => ipcRenderer.removeListener("google-calendar:status-changed", listener);
+  },
   getAgentProfile: () => ipcRenderer.invoke("agent:get-profile"),
   setAgentProfile: (profile) => ipcRenderer.invoke("agent:set-profile", profile),
   getMemoryOverview: () => ipcRenderer.invoke("memory:get-overview"),

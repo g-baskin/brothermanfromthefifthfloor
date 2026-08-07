@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   createGoogleOAuthClient,
   createPkcePair,
+  exchangeAuthorizationCode,
   GOOGLE_CALENDAR_SCOPE,
   GOOGLE_TOKEN_ENDPOINT,
 } from "../src/integrations/google/google-oauth.js";
@@ -40,6 +41,7 @@ test("PKCE uses a high-entropy verifier and S256 base64url challenge", () => {
 test("connect opens system authorization with state and PKCE then persists refresh token", async () => {
   const store = tokenStore();
   let authorizationUrl;
+  let browserMessage;
   let tokenRequest;
   const client = createGoogleOAuthClient({
     clientId: "desktop-client-id",
@@ -55,6 +57,7 @@ test("connect opens system authorization with state and PKCE then persists refre
       assert.equal(response.headers.get("cache-control"), "no-store");
       assert.equal(response.headers.get("x-content-type-options"), "nosniff");
       assert.equal(response.headers.get("x-frame-options"), "DENY");
+      browserMessage = await response.text();
     },
     fetchImpl: async (url, options) => {
       assert.equal(url, GOOGLE_TOKEN_ENDPOINT);
@@ -69,6 +72,12 @@ test("connect opens system authorization with state and PKCE then persists refre
 
   const result = await client.connect();
   assert.equal(result.connected, true);
+  assert.match(browserMessage, /authorization received/i);
+  assert.doesNotMatch(browserMessage, /connected.*close this tab/i);
+  assert.deepEqual(await client.getStatus(), {
+    state: "connected",
+    connectedAt: "2026-08-06T12:00:00.000Z",
+  });
   assert.equal(authorizationUrl.searchParams.get("scope"), GOOGLE_CALENDAR_SCOPE);
   assert.equal(authorizationUrl.searchParams.get("access_type"), "offline");
   assert.equal(authorizationUrl.searchParams.get("prompt"), "consent");
@@ -79,6 +88,43 @@ test("connect opens system authorization with state and PKCE then persists refre
   assert.equal(tokenRequest.has("client_secret"), false);
   assert.equal(store.inspect().refreshToken, "refresh-token");
   assert.equal(await client.getAccessToken(), "access-token");
+});
+
+test("callback receipt does not falsely confirm connection when token exchange fails", async () => {
+  const store = tokenStore();
+  let browserMessage;
+  const client = createGoogleOAuthClient({
+    clientId: "desktop-client-id",
+    tokenStore: store,
+    openExternal: async (url) => {
+      const auth = new URL(url);
+      const callbackUrl = new URL(auth.searchParams.get("redirect_uri"));
+      callbackUrl.searchParams.set("state", auth.searchParams.get("state"));
+      callbackUrl.searchParams.set("code", "authorization-code");
+      const response = await fetch(callbackUrl);
+      browserMessage = await response.text();
+    },
+    fetchImpl: async () => jsonResponse({ error: "invalid_client" }, 401),
+  });
+
+  await assert.rejects(client.connect(), (error) => error.code === "oauth_token_error");
+  assert.match(browserMessage, /authorization received/i);
+  assert.deepEqual(await client.getStatus(), { state: "disconnected" });
+  assert.equal(store.inspect(), null);
+});
+
+test("optional local desktop secret is included in authorization-code exchange", async () => {
+  await exchangeAuthorizationCode({
+    clientId: "desktop-client-id",
+    clientSecret: "local-desktop-secret",
+    code: "authorization-code",
+    codeVerifier: "verifier",
+    redirectUri: "http://127.0.0.1:12345/oauth2/callback",
+    fetchImpl: async (_url, options) => {
+      assert.equal(options.body.get("client_secret"), "local-desktop-secret");
+      return jsonResponse({ access_token: "access-token", expires_in: 3600 });
+    },
+  });
 });
 
 test("state mismatch rejects connection and leaves prior credentials untouched", async () => {
@@ -158,11 +204,13 @@ test("access token refresh caches tokens and invalid_grant removes credentials",
   let refreshCalls = 0;
   const client = createGoogleOAuthClient({
     clientId: "desktop-client-id",
+    clientSecret: "local-desktop-secret",
     tokenStore: store,
     openExternal: async () => {},
     fetchImpl: async (_url, options) => {
       refreshCalls += 1;
       assert.equal(options.body.get("refresh_token"), "stored-refresh");
+      assert.equal(options.body.get("client_secret"), "local-desktop-secret");
       if (refreshCalls === 1) {
         return jsonResponse({ access_token: "fresh-access", expires_in: 3600 });
       }

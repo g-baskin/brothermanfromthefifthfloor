@@ -58,13 +58,16 @@ Sign in to OpenAI from inside the app to start a Realtime session. That's it.
 ### Optional: connect Google Calendar
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Calendar API** and configure the OAuth consent screen.
-2. Create an OAuth client with application type **Desktop app**. Do not create or bundle a client secret.
+2. Create an OAuth client with application type **Desktop app**. Google may include an optional desktop client secret; it is not a confidential security control and must never be bundled or committed.
 3. While the consent screen is in testing, add each Google account that will connect as a **test user**. External production use of the sensitive Calendar scope may require Google verification.
-4. Start Brah with the desktop client ID, open **Settings → Google Calendar**, then choose **Connect**:
+4. Put the downloaded desktop credentials in ignored `.env.local`:
 
-```bash
-BRAH_GOOGLE_OAUTH_CLIENT_ID="your-desktop-client-id.apps.googleusercontent.com" npm start
+```dotenv
+BRAH_GOOGLE_OAUTH_CLIENT_ID="your-desktop-client-id.apps.googleusercontent.com"
+BRAH_GOOGLE_OAUTH_CLIENT_SECRET="your-local-desktop-client-secret"
 ```
+
+Run `npm start`, open **Settings → Google Calendar**, then choose **Connect**.
 
 Brah requests only `https://www.googleapis.com/auth/calendar.events.owned`. This permits event access on calendars the user owns; it does not grant calendar-sharing, ACL, settings, or arbitrary secondary-calendar administration. The refresh token is encrypted with Electron `safeStorage` and stored locally with owner-only file permissions; if secure storage is unavailable, connection fails rather than saving plaintext credentials.
 

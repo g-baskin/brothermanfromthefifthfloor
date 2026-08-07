@@ -17,6 +17,7 @@ export function createPkcePair() {
 
 export function createGoogleOAuthClient({
   clientId,
+  clientSecret = "",
   tokenStore,
   openExternal,
   fetchImpl = globalThis.fetch,
@@ -84,6 +85,7 @@ export function createGoogleOAuthClient({
 
       const tokens = await exchangeAuthorizationCode({
         clientId,
+        clientSecret,
         code,
         codeVerifier: verifier,
         redirectUri,
@@ -123,6 +125,7 @@ export function createGoogleOAuthClient({
       try {
         tokens = await refreshGoogleAccessToken({
           clientId,
+          clientSecret,
           refreshToken: stored.refreshToken,
           fetchImpl,
         });
@@ -177,6 +180,7 @@ export function createGoogleOAuthClient({
 
 export async function exchangeAuthorizationCode({
   clientId,
+  clientSecret = "",
   code,
   codeVerifier,
   redirectUri,
@@ -185,6 +189,7 @@ export async function exchangeAuthorizationCode({
   return requestTokens(
     new URLSearchParams({
       client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
       code,
       code_verifier: codeVerifier,
       grant_type: "authorization_code",
@@ -196,12 +201,14 @@ export async function exchangeAuthorizationCode({
 
 export async function refreshGoogleAccessToken({
   clientId,
+  clientSecret = "",
   refreshToken,
   fetchImpl = globalThis.fetch,
 }) {
   return requestTokens(
     new URLSearchParams({
       client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     }),
@@ -392,7 +399,7 @@ function sendBrowserResponse(response, success) {
   response.end(
     `<!doctype html><meta charset="utf-8"><title>Brah Google Calendar</title><p>${
       success
-        ? "Google Calendar connected. You can close this tab."
+        ? "Google Calendar authorization received. Return to Brah while it finishes and confirms the connection."
         : "Google Calendar did not connect. Return to Brah and try again."
     }</p>`,
   );

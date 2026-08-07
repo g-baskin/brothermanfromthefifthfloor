@@ -1,5 +1,9 @@
 import { buildWelcomeInstructions, normalizeAgentProfile } from "../realtime/prompts.js";
 import { initClickSound } from "./click-sound.js";
+import {
+  connectAndRefreshGoogleCalendar,
+  createGoogleCalendarStatusView,
+} from "./google-calendar-status.js";
 import { createPanelController } from "./panel.js";
 import { createRealtimePlaybackTracker, isBenignCancelError } from "./realtime-playback.js";
 import {
@@ -329,43 +333,20 @@ async function refreshSettings() {
 }
 
 function renderGoogleCalendarStatus(status = {}) {
-  const state = ["unconfigured", "disconnected", "connected", "connecting", "error"].includes(
-    status.state,
-  )
-    ? status.state
-    : "error";
-  const labels = {
-    unconfigured: "Not configured",
-    disconnected: "Disconnected",
-    connected: "Connected",
-    connecting: "Connecting…",
-    error: "Needs attention",
-  };
-  const messages = {
-    unconfigured: "Set BRAH_GOOGLE_OAUTH_CLIENT_ID to enable Google Calendar.",
-    disconnected: "Brah can manage events on calendars you own after you connect.",
-    connected: status.connectedAt
-      ? `Connected since ${new Date(status.connectedAt).toLocaleDateString()}. Brah can manage owned-calendar events.`
-      : "Connected. Brah can manage events on calendars you own.",
-    connecting: "Finish authorization in your system browser.",
-    error: status.message || "Google Calendar needs attention. Try connecting again.",
-  };
-
-  googleCalendarStateElement.dataset.state = state;
-  googleCalendarStateElement.textContent = labels[state];
-  googleCalendarStatusElement.textContent = status.message || messages[state];
+  const view = createGoogleCalendarStatusView(status);
+  googleCalendarStateElement.dataset.state = view.state;
+  googleCalendarStateElement.textContent = view.label;
+  googleCalendarStatusElement.textContent = view.message;
   googleCalendarConnectButton.hidden = false;
-  googleCalendarConnectButton.disabled = state === "connecting" || state === "unconfigured";
-  googleCalendarConnectButton.textContent =
-    state === "connecting" ? "Connecting…" : state === "connected" ? "Reconnect" : "Connect";
-  googleCalendarDisconnectButton.hidden = state !== "connected";
-  googleCalendarDisconnectButton.disabled = state === "connecting";
+  googleCalendarConnectButton.disabled = view.connectDisabled;
+  googleCalendarConnectButton.textContent = view.connectLabel;
+  googleCalendarDisconnectButton.hidden = view.disconnectHidden;
+  googleCalendarDisconnectButton.disabled = view.disconnectDisabled;
 }
 
 async function connectGoogleCalendarFromSettings() {
-  renderGoogleCalendarStatus({ state: "connecting" });
   try {
-    renderGoogleCalendarStatus(await window.brah.connectGoogleCalendar());
+    await connectAndRefreshGoogleCalendar(window.brah, renderGoogleCalendarStatus);
   } catch (error) {
     renderGoogleCalendarStatus({
       state: "error",
@@ -1974,6 +1955,16 @@ googleCalendarConnectButton.addEventListener("click", () => {
 });
 googleCalendarDisconnectButton.addEventListener("click", () => {
   void disconnectGoogleCalendarFromSettings();
+});
+window.brah.onGoogleCalendarStatusChanged((status) => {
+  renderGoogleCalendarStatus(status);
+  if (status?.state === "connected" || status?.state === "error") {
+    permissionsPanelElement.hidden = true;
+    agentPanelElement.hidden = true;
+    mobilePanelElement.hidden = true;
+    memoryPanelElement.hidden = true;
+    settingsPanelElement.hidden = false;
+  }
 });
 permissionsBackButton.addEventListener("click", () => {
   permissionsPanelElement.hidden = true;

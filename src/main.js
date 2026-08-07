@@ -1135,6 +1135,7 @@ function initializeGoogleCalendarIntegration() {
   });
   googleCalendarOAuth = createGoogleOAuthClient({
     clientId: process.env.BRAH_GOOGLE_OAUTH_CLIENT_ID?.trim() || "",
+    clientSecret: process.env.BRAH_GOOGLE_OAUTH_CLIENT_SECRET?.trim() || "",
     tokenStore,
     openExternal: (url) => shell.openExternal(url),
   });
@@ -1157,6 +1158,20 @@ async function getGoogleCalendarStatus() {
   return status;
 }
 
+function publishGoogleCalendarStatus(status, { focusWindow = false } = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("google-calendar:status-changed", status);
+  if (focusWindow) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
 async function connectGoogleCalendar() {
   if (!googleCalendarOAuth) {
     return { state: "error", message: "Google Calendar integration is not ready." };
@@ -1171,6 +1186,7 @@ async function connectGoogleCalendar() {
     await googleCalendarOAuth.connect();
     const status = await googleCalendarOAuth.getStatus();
     await writeDiagnosticLog("google_calendar.connect.finish", { state: status.state });
+    publishGoogleCalendarStatus(status, { focusWindow: true });
     return status;
   } catch (error) {
     googleCalendarLastError =
@@ -1178,7 +1194,9 @@ async function connectGoogleCalendar() {
     await writeDiagnosticLog("google_calendar.connect.error", {
       code: typeof error?.code === "string" ? error.code : "unknown",
     });
-    return { state: "error", message: googleCalendarLastError };
+    const status = { state: "error", message: googleCalendarLastError };
+    publishGoogleCalendarStatus(status, { focusWindow: true });
+    return status;
   } finally {
     googleCalendarConnecting = false;
   }
@@ -1194,12 +1212,14 @@ async function disconnectGoogleCalendar() {
     await writeDiagnosticLog("google_calendar.disconnect", {
       revocationFailed: result.revocationFailed,
     });
-    return {
+    const status = {
       state: "disconnected",
       ...(result.revocationFailed
         ? { message: "Disconnected locally, but Google token revocation could not be confirmed." }
         : {}),
     };
+    publishGoogleCalendarStatus(status);
+    return status;
   } catch (error) {
     await writeDiagnosticLog("google_calendar.disconnect.error", {
       code: typeof error?.code === "string" ? error.code : "unknown",
