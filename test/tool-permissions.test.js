@@ -33,6 +33,38 @@ test("getToolPermissionRequest classifies every active tool with a summary", () 
     description: "Delete a task from your local Tasks list.",
     summary: "query: Old task",
   });
+  assert.deepEqual(
+    getToolPermissionRequest("google_calendar_list_events", {
+      timeMin: "2026-08-07T00:00:00Z",
+      timeMax: "2026-08-08T00:00:00Z",
+      query: "standup",
+    }),
+    {
+      toolName: "google_calendar_list_events",
+      label: "Read Google Calendar",
+      level: "network",
+      description: "Read events from your connected Google primary calendar.",
+      summary: "timeMin: 2026-08-07T00:00:00Z, timeMax: 2026-08-08T00:00:00Z, query: standup",
+    },
+  );
+  assert.equal(
+    getToolPermissionRequest("google_calendar_create_event", { summary: "Standup" }).level,
+    "write",
+  );
+  assert.equal(
+    getToolPermissionRequest("google_calendar_update_event", { eventId: "event-1" }).level,
+    "write",
+  );
+  assert.deepEqual(
+    getToolPermissionRequest("google_calendar_delete_event", { eventId: "event-1" }),
+    {
+      toolName: "google_calendar_delete_event",
+      label: "Delete Google Calendar event",
+      level: "destructive",
+      description: "Permanently delete an event from your connected Google primary calendar.",
+      summary: "eventId: event-1",
+    },
+  );
   assert.deepEqual(getToolPermissionRequest("web_search", { query: "weather" }), {
     toolName: "web_search",
     label: "Search web",

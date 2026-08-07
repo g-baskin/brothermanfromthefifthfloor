@@ -34,6 +34,26 @@ const toolPermissionMetadata = Object.freeze({
     label: "Delete calendar item",
     description: "Delete an item from your local Calendar list.",
   },
+  google_calendar_list_events: {
+    level: "network",
+    label: "Read Google Calendar",
+    description: "Read events from your connected Google primary calendar.",
+  },
+  google_calendar_create_event: {
+    level: "write",
+    label: "Create Google Calendar event",
+    description: "Create an event on your connected Google primary calendar.",
+  },
+  google_calendar_update_event: {
+    level: "write",
+    label: "Update Google Calendar event",
+    description: "Update an event on your connected Google primary calendar.",
+  },
+  google_calendar_delete_event: {
+    level: "destructive",
+    label: "Delete Google Calendar event",
+    description: "Permanently delete an event from your connected Google primary calendar.",
+  },
   web_search: {
     level: "network",
     label: "Search web",
@@ -198,6 +218,14 @@ function summarizeToolRequest(name, args) {
       return summarizeFields(args, ["title", "date", "time"]);
     case "delete_calendar_item":
       return summarizeFields(args, ["query"]);
+    case "google_calendar_list_events":
+      return summarizeFields(args, ["timeMin", "timeMax", "query", "maxResults"]);
+    case "google_calendar_create_event":
+      return summarizeFields(args, ["summary", "start", "end", "location"]);
+    case "google_calendar_update_event":
+      return summarizeFields(args, ["eventId", "summary", "start", "end", "location"]);
+    case "google_calendar_delete_event":
+      return summarizeFields(args, ["eventId"]);
     case "web_search":
       return summarizeFields(args, ["query"]);
     case "web_fetch":

@@ -1086,6 +1086,90 @@ button {
   color: var(--text-3);
 }
 
+.integration-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 4px 2px;
+  padding: 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--raised);
+}
+
+.integration-heading,
+.integration-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.integration-card p {
+  margin: 0;
+}
+
+.integration-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
+.integration-state::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  content: "";
+}
+
+.integration-state[data-state="connected"]::before {
+  background: #5fd69a;
+  box-shadow: 0 0 8px rgba(95, 214, 154, 0.45);
+}
+
+.integration-state[data-state="connecting"]::before {
+  background: var(--accent);
+}
+
+.integration-state[data-state="error"]::before {
+  background: #ff8f7a;
+}
+
+.integration-actions {
+  justify-content: flex-start;
+}
+
+.integration-actions button {
+  padding: 7px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--accent-soft);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.integration-actions button:hover:not(:disabled) {
+  background: var(--raised-hover);
+}
+
+.integration-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.integration-actions .integration-secondary {
+  border-color: var(--hairline);
+  color: var(--text-2);
+  background: transparent;
+}
+
 .mobile-body,
 .memory-body {
   flex: 1;

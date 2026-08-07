@@ -264,5 +264,7 @@ test("tool status labels cover active tools", () => {
   assert.equal(formatToolStatus("computer_use_task"), "Using computer…");
   assert.equal(formatToolStatus("end_call"), "Ending call…");
   assert.equal(formatToolStatus("add_calendar_item"), "Using calendar…");
+  assert.equal(formatToolStatus("google_calendar_create_event"), "Using Google Calendar…");
+  assert.equal(formatToolStatus("google_calendar_delete_event"), "Using Google Calendar…");
   assert.equal(formatToolStatus("unknown"), "Using tool…");
 });

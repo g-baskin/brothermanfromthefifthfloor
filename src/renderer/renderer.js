@@ -30,6 +30,10 @@ const customVoiceIdElement = document.querySelector("#custom-voice-id");
 const voiceDescriptionElement = document.querySelector("#voice-description");
 const chatMemoryEnabledElement = document.querySelector("#chat-memory-enabled");
 const chatMemoryRetentionElement = document.querySelector("#chat-memory-retention");
+const googleCalendarStateElement = document.querySelector("#google-calendar-state");
+const googleCalendarStatusElement = document.querySelector("#google-calendar-status");
+const googleCalendarConnectButton = document.querySelector("#google-calendar-connect");
+const googleCalendarDisconnectButton = document.querySelector("#google-calendar-disconnect");
 const permissionsPanelElement = document.querySelector("#permissions-panel");
 const permissionsBackButton = document.querySelector("#permissions-back");
 const permissionsRefreshButton = document.querySelector("#permissions-refresh");
@@ -312,12 +316,74 @@ async function refreshOpenAIStatus() {
 }
 
 async function refreshSettings() {
-  const payload = await window.brah.getSettings();
+  const [payload, googleCalendarStatus] = await Promise.all([
+    window.brah.getSettings(),
+    window.brah.getGoogleCalendarStatus(),
+  ]);
   voiceOptions = Array.isArray(payload.voices) ? payload.voices : [];
   chatMemoryRetentionOptions = Array.isArray(payload.chatMemoryRetentionOptions)
     ? payload.chatMemoryRetentionOptions
     : [50, 100, 200, 400, 800];
   renderSettings(payload.settings ?? {});
+  renderGoogleCalendarStatus(googleCalendarStatus);
+}
+
+function renderGoogleCalendarStatus(status = {}) {
+  const state = ["unconfigured", "disconnected", "connected", "connecting", "error"].includes(
+    status.state,
+  )
+    ? status.state
+    : "error";
+  const labels = {
+    unconfigured: "Not configured",
+    disconnected: "Disconnected",
+    connected: "Connected",
+    connecting: "Connecting…",
+    error: "Needs attention",
+  };
+  const messages = {
+    unconfigured: "Set BRAH_GOOGLE_OAUTH_CLIENT_ID to enable Google Calendar.",
+    disconnected: "Brah can manage events on calendars you own after you connect.",
+    connected: status.connectedAt
+      ? `Connected since ${new Date(status.connectedAt).toLocaleDateString()}. Brah can manage owned-calendar events.`
+      : "Connected. Brah can manage events on calendars you own.",
+    connecting: "Finish authorization in your system browser.",
+    error: status.message || "Google Calendar needs attention. Try connecting again.",
+  };
+
+  googleCalendarStateElement.dataset.state = state;
+  googleCalendarStateElement.textContent = labels[state];
+  googleCalendarStatusElement.textContent = status.message || messages[state];
+  googleCalendarConnectButton.hidden = false;
+  googleCalendarConnectButton.disabled = state === "connecting" || state === "unconfigured";
+  googleCalendarConnectButton.textContent =
+    state === "connecting" ? "Connecting…" : state === "connected" ? "Reconnect" : "Connect";
+  googleCalendarDisconnectButton.hidden = state !== "connected";
+  googleCalendarDisconnectButton.disabled = state === "connecting";
+}
+
+async function connectGoogleCalendarFromSettings() {
+  renderGoogleCalendarStatus({ state: "connecting" });
+  try {
+    renderGoogleCalendarStatus(await window.brah.connectGoogleCalendar());
+  } catch (error) {
+    renderGoogleCalendarStatus({
+      state: "error",
+      message: error instanceof Error ? error.message : "Google Calendar could not connect.",
+    });
+  }
+}
+
+async function disconnectGoogleCalendarFromSettings() {
+  googleCalendarDisconnectButton.disabled = true;
+  try {
+    renderGoogleCalendarStatus(await window.brah.disconnectGoogleCalendar());
+  } catch (error) {
+    renderGoogleCalendarStatus({
+      state: "error",
+      message: error instanceof Error ? error.message : "Google Calendar could not disconnect.",
+    });
+  }
 }
 
 function renderSettings(settings) {
@@ -1902,6 +1968,12 @@ chatMemoryEnabledElement.addEventListener("change", () => {
 });
 chatMemoryRetentionElement.addEventListener("change", () => {
   void saveChatMemorySettings();
+});
+googleCalendarConnectButton.addEventListener("click", () => {
+  void connectGoogleCalendarFromSettings();
+});
+googleCalendarDisconnectButton.addEventListener("click", () => {
+  void disconnectGoogleCalendarFromSettings();
 });
 permissionsBackButton.addEventListener("click", () => {
   permissionsPanelElement.hidden = true;

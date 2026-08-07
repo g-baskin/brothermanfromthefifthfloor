@@ -137,6 +137,19 @@
               <span class="settings-hint">Caps stored chat memory. Higher values remember more but add more recall context.</span>
               <select id="chat-memory-retention" class="settings-select"></select>
             </label>
+            <section class="integration-card" aria-labelledby="google-calendar-title">
+              <div class="integration-heading">
+                <span id="google-calendar-title" class="settings-label">Google Calendar</span>
+                <span id="google-calendar-state" class="integration-state" data-state="disconnected">Disconnected</span>
+              </div>
+              <p id="google-calendar-status" class="settings-hint" aria-live="polite">
+                Brah can manage events on calendars you own after you connect.
+              </p>
+              <div class="integration-actions">
+                <button id="google-calendar-connect" type="button">Connect</button>
+                <button id="google-calendar-disconnect" type="button" class="integration-secondary" hidden>Disconnect</button>
+              </div>
+            </section>
           </div>
         </section>
         <section

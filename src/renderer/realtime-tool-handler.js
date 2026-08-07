@@ -150,6 +150,11 @@ export function formatToolStatus(name) {
     case "list_calendar_items":
     case "delete_calendar_item":
       return "Using calendar…";
+    case "google_calendar_list_events":
+    case "google_calendar_create_event":
+    case "google_calendar_update_event":
+    case "google_calendar_delete_event":
+      return "Using Google Calendar…";
     default:
       return "Using tool…";
   }

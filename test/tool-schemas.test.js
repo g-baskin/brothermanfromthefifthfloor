@@ -19,6 +19,10 @@ const expectedToolNames = [
   "add_calendar_item",
   "list_calendar_items",
   "delete_calendar_item",
+  "google_calendar_list_events",
+  "google_calendar_create_event",
+  "google_calendar_update_event",
+  "google_calendar_delete_event",
   "web_search",
   "web_fetch",
   "read_file",
@@ -54,6 +58,23 @@ test("tool definitions are function schemas with object parameters", () => {
 test("computer_use_task target enum offers browser and computer modes", () => {
   const tool = getRealtimeToolDefinitions().find((item) => item.name === "computer_use_task");
   assert.deepEqual(tool.parameters.properties.target.enum, ["browser", "computer"]);
+});
+
+test("Google Calendar schemas enforce bounded ranges and strict event contracts", () => {
+  const tools = getRealtimeToolDefinitions();
+  const list = tools.find((tool) => tool.name === "google_calendar_list_events");
+  const create = tools.find((tool) => tool.name === "google_calendar_create_event");
+  const update = tools.find((tool) => tool.name === "google_calendar_update_event");
+  const remove = tools.find((tool) => tool.name === "google_calendar_delete_event");
+
+  assert.deepEqual(list.parameters.required, ["timeMin", "timeMax"]);
+  assert.equal(list.parameters.properties.maxResults.maximum, 50);
+  assert.equal(list.parameters.additionalProperties, false);
+  assert.deepEqual(create.parameters.required, ["summary", "start", "end"]);
+  assert.deepEqual(update.parameters.required, ["eventId"]);
+  assert.deepEqual(remove.parameters.required, ["eventId"]);
+  assert.equal(create.parameters.properties.summary.maxLength, 1024);
+  assert.equal(create.parameters.properties.description.maxLength, 8192);
 });
 
 test("returned tool definitions are cloned to prevent caller mutation", () => {

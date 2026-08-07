@@ -79,6 +79,7 @@ async function withToolHarness(callback) {
         openAI: { accessToken: "test-token", accountId: "acc-test" },
         computerTargetFactory: async () => createComputerHarness(),
       },
+      googleCalendar: createGoogleCalendarHarness(),
       fileSystem: { rootPath: directory },
     });
   } finally {
@@ -86,6 +87,21 @@ async function withToolHarness(callback) {
     closeDatabase(storePath);
     await rm(directory, { force: true, recursive: true });
   }
+}
+
+function createGoogleCalendarHarness() {
+  const event = {
+    id: "google-event-1",
+    summary: "Google event",
+    start: { value: "2026-08-07T09:00:00-04:00", allDay: false },
+    end: { value: "2026-08-07T09:30:00-04:00", allDay: false },
+  };
+  return {
+    listEvents: async () => ({ events: [event], nextPageToken: null }),
+    createEvent: async (args) => ({ ...event, ...args }),
+    updateEvent: async (eventId, patch) => ({ ...event, ...patch, id: eventId }),
+    deleteEvent: async (eventId) => ({ deleted: true, eventId }),
+  };
 }
 
 function createComputerHarness() {
@@ -292,6 +308,44 @@ test("every registered Realtime tool executes a functional path", async () => {
 
     result = await executeRealtimeTool("delete_calendar_item", { query: "Tool review" }, options);
     observedNames.push("delete_calendar_item");
+    assert.equal(result.status, "deleted");
+
+    result = await executeRealtimeTool(
+      "google_calendar_list_events",
+      { timeMin: "2026-08-07T00:00:00Z", timeMax: "2026-08-08T00:00:00Z" },
+      options,
+    );
+    observedNames.push("google_calendar_list_events");
+    assert.equal(result.status, "listed");
+    assert.equal(result.events.length, 1);
+
+    result = await executeRealtimeTool(
+      "google_calendar_create_event",
+      {
+        summary: "Google event",
+        start: "2026-08-07T09:00:00-04:00",
+        end: "2026-08-07T09:30:00-04:00",
+      },
+      options,
+    );
+    observedNames.push("google_calendar_create_event");
+    assert.equal(result.status, "created");
+
+    result = await executeRealtimeTool(
+      "google_calendar_update_event",
+      { eventId: "google-event-1", summary: "Renamed Google event" },
+      options,
+    );
+    observedNames.push("google_calendar_update_event");
+    assert.equal(result.status, "updated");
+    assert.equal(result.event.summary, "Renamed Google event");
+
+    result = await executeRealtimeTool(
+      "google_calendar_delete_event",
+      { eventId: "google-event-1" },
+      options,
+    );
+    observedNames.push("google_calendar_delete_event");
     assert.equal(result.status, "deleted");
 
     result = await executeRealtimeTool(

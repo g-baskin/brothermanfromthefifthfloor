@@ -36,8 +36,8 @@ Two modes:
 - **Browser mode:** A sandboxed Chromium browser (via Playwright) for web tasks
 - **OS mode:** Full OS-level control (via nut.js) to drive the real mouse and keyboard
 
-### Planner
-Built-in tasks and calendar the agent can create, update, and remind you about.
+### Planner and Google Calendar
+Use Brah's built-in local planner or connect an owned Google Calendar for real event listing, creation, updates, and deletion.
 
 ### Web search & fetch
 Pulls live information and reads pages on demand.
@@ -54,6 +54,19 @@ npm start
 ```
 
 Sign in to OpenAI from inside the app to start a Realtime session. That's it.
+
+### Optional: connect Google Calendar
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Google Calendar API** and configure the OAuth consent screen.
+2. Create an OAuth client with application type **Desktop app**. Do not create or bundle a client secret.
+3. While the consent screen is in testing, add each Google account that will connect as a **test user**. External production use of the sensitive Calendar scope may require Google verification.
+4. Start Brah with the desktop client ID, open **Settings → Google Calendar**, then choose **Connect**:
+
+```bash
+BRAH_GOOGLE_OAUTH_CLIENT_ID="your-desktop-client-id.apps.googleusercontent.com" npm start
+```
+
+Brah requests only `https://www.googleapis.com/auth/calendar.events.owned`. This permits event access on calendars the user owns; it does not grant calendar-sharing, ACL, settings, or arbitrary secondary-calendar administration. The refresh token is encrypted with Electron `safeStorage` and stored locally with owner-only file permissions; if secure storage is unavailable, connection fails rather than saving plaintext credentials.
 
 ---
 

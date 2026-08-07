@@ -340,6 +340,76 @@ export const realtimeToolDefinitions = Object.freeze([
   },
   {
     type: "function",
+    name: "google_calendar_list_events",
+    description:
+      "List events from the connected Google primary calendar in a bounded RFC3339 time range. Use this for the user's real Google Calendar, not the local planner list.",
+    parameters: {
+      type: "object",
+      properties: {
+        timeMin: {
+          type: "string",
+          description: "Inclusive lower bound as an RFC3339 date-time with time zone offset.",
+          format: "date-time",
+          maxLength: 40,
+        },
+        timeMax: {
+          type: "string",
+          description: "Exclusive upper bound as an RFC3339 date-time with time zone offset.",
+          format: "date-time",
+          maxLength: 40,
+        },
+        query: {
+          type: "string",
+          description: "Optional Google Calendar free-text search query.",
+          minLength: 1,
+          maxLength: 200,
+        },
+        maxResults: {
+          type: "integer",
+          description: "Maximum events to return, default 20 and cap 50.",
+          minimum: 1,
+          maximum: 50,
+        },
+      },
+      required: ["timeMin", "timeMax"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "google_calendar_create_event",
+    description:
+      "Create an event on the connected Google primary calendar. Use YYYY-MM-DD for all-day dates or RFC3339 date-times for timed events; the exclusive end must be later than the start.",
+    parameters: createGoogleCalendarEventParameters({ requireCoreFields: true }),
+  },
+  {
+    type: "function",
+    name: "google_calendar_update_event",
+    description:
+      "Patch only supplied fields on an event in the connected Google primary calendar using its opaque Google event ID.",
+    parameters: createGoogleCalendarEventParameters({ includeEventId: true }),
+  },
+  {
+    type: "function",
+    name: "google_calendar_delete_event",
+    description:
+      "Permanently delete an event from the connected Google primary calendar by opaque Google event ID. Confirm with the user immediately before calling this destructive tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        eventId: {
+          type: "string",
+          description: "Opaque Google Calendar event ID returned by a list or create call.",
+          minLength: 1,
+          maxLength: 1024,
+        },
+      },
+      required: ["eventId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "web_search",
     description:
       "Search the public web for current information and return concise result summaries.",
@@ -614,6 +684,64 @@ function createScreenshotTargetParameters({ includeQuestion }) {
         : {}),
     },
     required: [],
+    additionalProperties: false,
+  };
+}
+
+function createGoogleCalendarEventParameters({
+  includeEventId = false,
+  requireCoreFields = false,
+}) {
+  return {
+    type: "object",
+    properties: {
+      ...(includeEventId
+        ? {
+            eventId: {
+              type: "string",
+              description: "Opaque Google Calendar event ID returned by a list or create call.",
+              minLength: 1,
+              maxLength: 1024,
+            },
+          }
+        : {}),
+      summary: {
+        type: "string",
+        description: "Event title.",
+        minLength: 1,
+        maxLength: 1024,
+      },
+      start: {
+        type: "string",
+        description: "Start as YYYY-MM-DD for all-day or RFC3339 for a timed event.",
+        maxLength: 40,
+      },
+      end: {
+        type: "string",
+        description: "Exclusive end in the same form as start; must be later than start.",
+        maxLength: 40,
+      },
+      description: {
+        type: "string",
+        description: "Optional event description. Pass an empty string to clear it.",
+        maxLength: 8192,
+      },
+      location: {
+        type: "string",
+        description: "Optional event location. Pass an empty string to clear it.",
+        maxLength: 1024,
+      },
+      timeZone: {
+        type: "string",
+        description: "Optional IANA time zone for timed start/end values.",
+        minLength: 1,
+        maxLength: 100,
+      },
+    },
+    required: [
+      ...(includeEventId ? ["eventId"] : []),
+      ...(requireCoreFields ? ["summary", "start", "end"] : []),
+    ],
     additionalProperties: false,
   };
 }

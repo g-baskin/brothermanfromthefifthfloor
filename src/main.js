@@ -21,6 +21,9 @@ import {
 import electronUpdater from "electron-updater";
 import QRCode from "qrcode";
 import WebSocket from "ws";
+import { createEncryptedTokenStore } from "./integrations/google/encrypted-token-store.js";
+import { createGoogleCalendarClient } from "./integrations/google/google-calendar-client.js";
+import { createGoogleOAuthClient } from "./integrations/google/google-oauth.js";
 import { createMobileBridgeServer } from "./mobile/bridge-server.js";
 import {
   clearPairingSession,
@@ -185,6 +188,10 @@ let windowFadeResolve = null;
 let activeComputerUseController = null;
 let mobileBridgeServer = null;
 let mobileBridgeHost = "127.0.0.1";
+let googleCalendarOAuth = null;
+let googleCalendarClient = null;
+let googleCalendarConnecting = false;
+let googleCalendarLastError = null;
 const mobileVoiceStreams = new Map();
 const mobileVoiceConversations = new Map();
 let mobileDevServerProcess = null;
@@ -452,6 +459,9 @@ ipcMain.handle("openai:logout", async () => {
 ipcMain.handle("openai:create-realtime-secret", async (_event, options = {}) =>
   createRealtimeSecret(options),
 );
+ipcMain.handle("google-calendar:get-status", () => getGoogleCalendarStatus());
+ipcMain.handle("google-calendar:connect", () => connectGoogleCalendar());
+ipcMain.handle("google-calendar:disconnect", () => disconnectGoogleCalendar());
 
 ipcMain.handle("agent:get-profile", () => loadAgentProfile());
 ipcMain.handle("agent:set-profile", (_event, profile) => saveAgentProfile(profile));
@@ -1066,6 +1076,7 @@ async function executeToolRequest(name, args = {}) {
       fileSystem: {
         rootPath: app.getPath("home"),
       },
+      googleCalendar: googleCalendarClient,
     });
     await writeDiagnosticLog("tool.execute.finish", {
       tool: name,
@@ -1117,8 +1128,92 @@ async function recordAssistantChatTurn(turn) {
   }
 }
 
+function initializeGoogleCalendarIntegration() {
+  const tokenStore = createEncryptedTokenStore({
+    filePath: path.join(app.getPath("userData"), "google-calendar-credentials.json"),
+    safeStorage,
+  });
+  googleCalendarOAuth = createGoogleOAuthClient({
+    clientId: process.env.BRAH_GOOGLE_OAUTH_CLIENT_ID?.trim() || "",
+    tokenStore,
+    openExternal: (url) => shell.openExternal(url),
+  });
+  googleCalendarClient = createGoogleCalendarClient({
+    getAccessToken: (options) => googleCalendarOAuth.getAccessToken(options),
+  });
+}
+
+async function getGoogleCalendarStatus() {
+  if (googleCalendarConnecting) {
+    return { state: "connecting" };
+  }
+  if (!googleCalendarOAuth) {
+    return { state: "error", message: "Google Calendar integration is not ready." };
+  }
+  const status = await googleCalendarOAuth.getStatus();
+  if (status.state === "disconnected" && googleCalendarLastError) {
+    return { ...status, message: googleCalendarLastError };
+  }
+  return status;
+}
+
+async function connectGoogleCalendar() {
+  if (!googleCalendarOAuth) {
+    return { state: "error", message: "Google Calendar integration is not ready." };
+  }
+  if (googleCalendarConnecting) {
+    return { state: "connecting" };
+  }
+  googleCalendarConnecting = true;
+  googleCalendarLastError = null;
+  void writeDiagnosticLog("google_calendar.connect.start", {});
+  try {
+    await googleCalendarOAuth.connect();
+    const status = await googleCalendarOAuth.getStatus();
+    await writeDiagnosticLog("google_calendar.connect.finish", { state: status.state });
+    return status;
+  } catch (error) {
+    googleCalendarLastError =
+      error instanceof Error ? error.message : "Google Calendar could not connect.";
+    await writeDiagnosticLog("google_calendar.connect.error", {
+      code: typeof error?.code === "string" ? error.code : "unknown",
+    });
+    return { state: "error", message: googleCalendarLastError };
+  } finally {
+    googleCalendarConnecting = false;
+  }
+}
+
+async function disconnectGoogleCalendar() {
+  if (!googleCalendarOAuth) {
+    return { state: "error", message: "Google Calendar integration is not ready." };
+  }
+  googleCalendarLastError = null;
+  try {
+    const result = await googleCalendarOAuth.disconnect();
+    await writeDiagnosticLog("google_calendar.disconnect", {
+      revocationFailed: result.revocationFailed,
+    });
+    return {
+      state: "disconnected",
+      ...(result.revocationFailed
+        ? { message: "Disconnected locally, but Google token revocation could not be confirmed." }
+        : {}),
+    };
+  } catch (error) {
+    await writeDiagnosticLog("google_calendar.disconnect.error", {
+      code: typeof error?.code === "string" ? error.code : "unknown",
+    });
+    return {
+      state: "error",
+      message: error instanceof Error ? error.message : "Google Calendar could not disconnect.",
+    };
+  }
+}
+
 app.whenReady().then(async () => {
   initializeDataStore();
+  initializeGoogleCalendarIntegration();
   await startMobileBridgeForSavedDevices();
   void startDiagnosticSession();
   wireUpdateEvents();
